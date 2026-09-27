@@ -61,7 +61,8 @@ param(
     [switch]$HostSweep,
     [pscredential]$Credential,  # enumerate AS a captured user (LDAP engine) without spawning a shell
     [string[]]$Only,            # run ONLY sections matching these keywords (e.g. users,acls,delegation)
-    [string[]]$Skip             # skip sections matching these keywords
+    [string[]]$Skip,            # skip sections matching these keywords
+    [switch]$Zip                # also zip the whole run folder (easy transfer / reporting)
 )
 
 function Invoke-CRTPEnum {
@@ -84,7 +85,8 @@ function Invoke-CRTPEnum {
         [switch]$HostSweep,      # enable host-touching sweeps (local-admin/shares/sessions) domain-wide (LOUD)
         [pscredential]$Credential, # enumerate AS a captured user (drives the built-in LDAP engine)
         [string[]]$Only,         # run ONLY sections whose keyword(s) match these
-        [string[]]$Skip          # skip sections whose keyword(s) match these
+        [string[]]$Skip,         # skip sections whose keyword(s) match these
+        [switch]$Zip             # also zip the run folder when done
     )
 
     $ErrorActionPreference = 'SilentlyContinue'
@@ -338,7 +340,7 @@ function Invoke-CRTPEnum {
                 servicePrincipalName,description,info,memberOf,adminCount,userAccountControl,`
                 pwdLastSet,lastLogonTimestamp,'msDS-AllowedToDelegateTo',trustedForDelegation,`
                 doesNotRequirePreAuth,userPrincipalName,'msDS-AllowedToActOnBehalfOfOtherIdentity',`
-                'msDS-SupportedEncryptionTypes'
+                'msDS-SupportedEncryptionTypes',sIDHistory
 
             $out += ($users | Select-Object SamAccountName,Enabled,adminCount,description | Format-Table -Auto | Out-String)
 
@@ -365,6 +367,9 @@ function Invoke-CRTPEnum {
             foreach($u in ($users | Where-Object { $_.info -and $_.info -match 'pass|pwd|cred|secret' })){
                 Flag 'HIGH' "Possible secret in info/notes [$($u.SamAccountName)]: $($u.info)"
             }
+            foreach($u in ($users | Where-Object { $_.sIDHistory -and $_.sIDHistory.Count })){
+                Flag 'HIGH' "SID history on user $($u.SamAccountName): $($u.sIDHistory -join ', ') (cross-domain path or injected persistence)"
+            }
             Save '02b_admincount.txt' (($users | Where-Object { $_.adminCount -eq 1 }) | Select-Object SamAccountName,memberOf | Format-List | Out-String)
         }
         elseif ($havePV) {
@@ -387,6 +392,9 @@ function Invoke-CRTPEnum {
             }
             foreach($r in (LDAP '(&(objectCategory=user)(description=*))' @('samaccountname','description'))){
                 $ds = PV $r 'description'; if ($ds -match 'pass|pwd|cred|secret'){ Flag 'HIGH' "Desc secret [$(PV $r 'samaccountname')]: $ds" }
+            }
+            foreach($r in (LDAP '(&(objectCategory=user)(sIDHistory=*))' @('samaccountname'))){
+                Flag 'HIGH' "SID history on user $(PV $r 'samaccountname') (cross-domain path or injected persistence)"
             }
         }
     } catch { $out += "Error: $_" }
@@ -450,6 +458,13 @@ function Invoke-CRTPEnum {
             }
         }
         Flag 'INFO' "DnsAdmins member -> arbitrary DLL load on DC (dnscmd /serverlevelplugindll) is a known DC escalation."
+
+        # AdminSDHolder ACL - who can modify it = persistent DA (SDProp re-applies rights every 60 min)
+        $out += "`n--- AdminSDHolder WRITE RIGHTS (non-default) ---"
+        foreach($ace in (WriteAces "CN=AdminSDHolder,CN=System,$defaultNC")){
+            Flag 'HIGH' "AdminSDHolder writable by $($ace.Who) ($($ace.Rights)) -> persistent Domain Admin (AD ACL backdoor)"
+            $out += "AdminSDHolder  <-  $($ace.Who)  [$($ace.Rights)]"
+        }
     } catch { $out += "Error: $_" }
     Save '04_priv_groups.txt' $out
     }
@@ -1568,6 +1583,17 @@ tr.hi{background:#2d1416}tr:hover{background:#161b22}
         Save '_ALL.txt' $all
         Log " ALL merged  : $run\_ALL.txt   (everything in one file)" 'Green'
     } catch {}
+
+    # ---------------- optional: zip the run folder ----------------
+    if ($Zip) {
+        try {
+            $zipPath = "$run.zip"
+            if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [System.IO.Compression.ZipFile]::CreateFromDirectory($run, $zipPath)
+            Log " Zipped     : $zipPath" 'Green'
+        } catch { Log " (zip failed: $_)" 'DarkGray' }
+    }
 
     Log "`n============================================================" 'Green'
     Log " DONE.  HIGH=$($high.Count)  MED=$($med.Count)  INFO=$($inf.Count)" 'Green'
