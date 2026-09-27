@@ -1,0 +1,9 @@
+# Never commit recon output (contains real host/domain data: SIDs, hostnames, creds)
+CRTPEnum_*/
+_MASTER_findings.txt
+loot/
+*.dmp
+*.kirbi
+*.pfx
+*_hashes.txt
+bloodhound_*.zip
