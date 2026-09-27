@@ -137,6 +137,8 @@ FLAGS
  -Credential <cred>    enumerate AS a captured user via the LDAP engine (no shell).
                        $c=New-Object Management.Automation.PSCredential('dom\user',$sec)
  -Zip                  also zip the whole run folder (easy transfer / reporting).
+ -Json                 also write findings.json (values + findings) for tooling /
+                       importing into the CRTP cheatsheet's "My Values" panel.
  -Only <keywords>      run ONLY the matching sections (comma list). Default: all.
  -Skip <keywords>      skip matching sections. -Skip beats -Only.
    Section keywords: context token | domain trust forest | users kerberoast asrep

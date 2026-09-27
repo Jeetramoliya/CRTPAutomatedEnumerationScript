@@ -62,7 +62,8 @@ param(
     [pscredential]$Credential,  # enumerate AS a captured user (LDAP engine) without spawning a shell
     [string[]]$Only,            # run ONLY sections matching these keywords (e.g. users,acls,delegation)
     [string[]]$Skip,            # skip sections matching these keywords
-    [switch]$Zip                # also zip the whole run folder (easy transfer / reporting)
+    [switch]$Zip,               # also zip the whole run folder (easy transfer / reporting)
+    [switch]$Json               # also write findings.json (machine-readable: values + findings)
 )
 
 function Invoke-CRTPEnum {
@@ -86,7 +87,8 @@ function Invoke-CRTPEnum {
         [pscredential]$Credential, # enumerate AS a captured user (drives the built-in LDAP engine)
         [string[]]$Only,         # run ONLY sections whose keyword(s) match these
         [string[]]$Skip,         # skip sections whose keyword(s) match these
-        [switch]$Zip             # also zip the run folder when done
+        [switch]$Zip,            # also zip the run folder when done
+        [switch]$Json            # also write findings.json (values + findings, for tooling)
     )
 
     $ErrorActionPreference = 'SilentlyContinue'
@@ -1583,6 +1585,43 @@ tr.hi{background:#2d1416}tr:hover{background:#161b22}
         Save '_ALL.txt' $all
         Log " ALL merged  : $run\_ALL.txt   (everything in one file)" 'Green'
     } catch {}
+
+    # ---------------- optional: machine-readable findings.json ----------------
+    if ($Json) {
+        try {
+            $mkF = {
+                param($arr,$sev)
+                $arr | Where-Object { $_ } | ForEach-Object {
+                    [PSCustomObject]@{ severity = $sev; text = ($_ -replace '^\[[A-Za-z ]+\]\s*','') }
+                }
+            }
+            $allFind = @()
+            $allFind += (& $mkF $high 'HIGH')
+            $allFind += (& $mkF $med  'MED')
+            $allFind += (& $mkF $inf  'INFO')
+            $exploitable = @($expl | ForEach-Object { [PSCustomObject]@{ type = $_.Type; data = $_.Data } })
+            $jsonObj = [PSCustomObject]@{
+                meta = [PSCustomObject]@{
+                    domain    = $Domain
+                    ranBy     = "$(whoami)"
+                    host      = "$(hostname)"
+                    generated = (Get-Date -Format 'o')
+                    run       = $run
+                }
+                values = [PSCustomObject]@{
+                    domainSid = $g_domainSID
+                    parent    = $g_parent
+                    forest    = $g_forest
+                    dc        = $g_dc
+                }
+                counts = [PSCustomObject]@{ high = $high.Count; med = $med.Count; info = $inf.Count }
+                findings    = $allFind
+                exploitable = $exploitable
+            }
+            $jsonObj | ConvertTo-Json -Depth 6 | Out-File (Join-Path $run 'findings.json') -Encoding UTF8
+            Log " JSON       : $run\findings.json  (machine-readable: values + findings)" 'Green'
+        } catch { Log " (json failed: $_)" 'DarkGray' }
+    }
 
     # ---------------- optional: zip the run folder ----------------
     if ($Zip) {
