@@ -314,11 +314,11 @@ Run just the sections you want (fast, targeted). Keywords are listed under `-Onl
 | Domain/Trusts | `01_` | DCs, trust direction, SID-filtering state |
 | Users | `02_`, `02a`, `02b` | Kerberoastable (RC4/AES + `adminCount` priority), AS-REP, no-preauth, PASSWD_NOTREQD, desc/info secrets, delegation, **protocol transition**, **SID history**, adminCount |
 | Computers | `03_` | Unconstrained/constrained delegation, RBCD, **protocol transition**, MachineAccountQuota, legacy OS |
-| Priv groups | `04_` | DA/EA/Admins/DnsAdmins/… recursive membership + **AdminSDHolder write rights** (persistent DA) |
+| Priv groups | `04_` | DA/EA/Admins/DnsAdmins/… recursive membership + **AdminSDHolder write rights** + **Protected/operator-group abuse** (Account/Backup/Server/Print Operators, DnsAdmins → SYSTEM/DA, flagged HIGH if your token is a member) |
 | GPO | `05_` | GPO list + auto SYSVOL `cpassword` scan + **GPO edit rights** |
 | AD CS | `06_` | Enterprise CA + **ESC1 vulnerable-template auto-detect (pure LDAP, no Certify)** |
 | Password policy | `06b_` | minLen / lockout → tells you if spraying is safe |
-| DCSync rights | `06c_` | Non-default principals with replication rights (→ dcsync) |
+| DCSync rights | `06c_` | Non-default principals with replication rights (→ dcsync) + **krbtgt password age** (golden-ticket viability) |
 | LAPS | `06d_` | Local-admin passwords you can read **+ who else is delegated read** |
 | ACLs | `07_` | GenericAll/WriteDacl/WriteOwner (needs PowerView) |
 | Local admin | `08_` | Hosts where you are local admin (needs PowerView) |

