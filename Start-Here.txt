@@ -40,10 +40,12 @@ All flags below work in BOTH forms, e.g.:
        .\Invoke-CRTPEnum.ps1 -Domain dollarcorp.moneycorp.local -Target dcorp-appsrv -HostSweep
 
 Then read, in this order:
-    C:\Users\Public\loot\CRTPEnum_*\00_SUMMARY.txt        (ranked findings)
-    C:\Users\Public\loot\CRTPEnum_*\EXPLOIT_COMMANDS.txt  (command per finding)
-    C:\Users\Public\loot\CRTPEnum_*\CRTP-Playbook.txt     (phase 0-8 whole-exam guide)
-    C:\Users\Public\loot\CRTPEnum_*\00_SUMMARY.html       (for the report)
+    ...\CRTPEnum_*\00_SUMMARY.txt        (ranked findings + ">>> RECOMMENDED NEXT MOVE" at bottom)
+    ...\CRTPEnum_*\ATTACK_CHAIN.txt      (ordered route to EA + per-finding "1->2->3 => WIN" chains,
+                                          with PRIMARY/ALT paths so a honeypot never stalls you)
+    ...\CRTPEnum_*\EXPLOIT_COMMANDS.txt  (the exact command per finding)
+    ...\CRTPEnum_*\CRTP-Playbook.txt     (phase 0-8 whole-exam guide)
+    ...\CRTPEnum_*\00_SUMMARY.html       (for the report)   |   _ALL.txt (everything in one file)
 
 ------------------------------------------------
 OPTION B - Operational (InviShell handles logging/AMSI, not the script)
@@ -71,11 +73,12 @@ Keep the recon tool clean; let InviShell own the environment.
 ------------------------------------------------
 WORKFLOW LOOP (repeat after every new foothold)
 ------------------------------------------------
- 1) Invoke-CRTPEnum  -> read 00_SUMMARY.txt HIGH lines
- 2) open EXPLOIT_COMMANDS.txt -> copy the command for that finding
+ 1) Invoke-CRTPEnum  -> read 00_SUMMARY.txt (HIGH first) + the ">>> RECOMMENDED NEXT MOVE" line
+ 2) open ATTACK_CHAIN.txt -> pick the PRIMARY path (or an ALT if it's a honeypot/dead end);
+    each finding has a "1) 2) 3) => WIN" chain. Exact syntax is in EXPLOIT_COMMANDS.txt
  3) fill the <placeholders> (cracked hash, wordlist, DC name, cert pass)
  4) run it with YOUR tools (Rubeus / Certify / Invoke-Mimi / minidumpdotnet)
- 5) new creds/host -> re-run Invoke-CRTPEnum from there
+ 5) new creds/host -> re-run Invoke-CRTPEnum from there (check NEW_this_run.txt for the delta)
  6) _MASTER_findings.txt keeps the running log across all runs
 
 ------------------------------------------------

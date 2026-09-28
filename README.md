@@ -202,9 +202,11 @@ bottom line — **`>>> RECOMMENDED NEXT MOVE`** — names the single highest-val
   trust → persistence), pre-filled with your domain name, SID, and DC. Covers the manual
   ticket-forging / cross-trust / persistence scenarios the script does *not* auto-run.
 - **`ATTACK_CHAIN.txt`** — **the route to Enterprise Admin, built from THIS run's findings.**
-  An ordered, numbered chain (local→SYSTEM → domain cred → domain privesc → DA/krbtgt →
-  child→parent EA → cross-forest), each step filled from what was actually found. Steps with
-  no finding show as `[GAP]` so you see exactly which link you still need. Follow it top-down.
+  Two parts: (1) an ordered route (local→SYSTEM → domain cred → domain privesc → DA/krbtgt →
+  child→parent EA → cross-forest) that lists **every path per phase — PRIMARY + ALT#2/#3 —**
+  so if one is a **honeypot/decoy or dead end you fall back to an ALT**; and (2) **per-finding
+  fast chains**: each finding as a `1) 2) 3) => WIN` command sequence straight to a flag. Steps
+  with no finding show as `[GAP]` so you see exactly which link you still need.
 - `_MASTER_findings.txt` (in `-OutDir`) — **accumulates HIGH+MED across every run, deduped.**
   Re-run after each lateral move and this file grows into your full attack log —
   no diffing folders.
