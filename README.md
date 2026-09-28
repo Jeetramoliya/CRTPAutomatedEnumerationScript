@@ -201,6 +201,10 @@ bottom line — **`>>> RECOMMENDED NEXT MOVE`** — names the single highest-val
   domain recon → creds → domain privesc → DA/DC → child→parent SID-history → cross-forest
   trust → persistence), pre-filled with your domain name, SID, and DC. Covers the manual
   ticket-forging / cross-trust / persistence scenarios the script does *not* auto-run.
+- **`ATTACK_CHAIN.txt`** — **the route to Enterprise Admin, built from THIS run's findings.**
+  An ordered, numbered chain (local→SYSTEM → domain cred → domain privesc → DA/krbtgt →
+  child→parent EA → cross-forest), each step filled from what was actually found. Steps with
+  no finding show as `[GAP]` so you see exactly which link you still need. Follow it top-down.
 - `_MASTER_findings.txt` (in `-OutDir`) — **accumulates HIGH+MED across every run, deduped.**
   Re-run after each lateral move and this file grows into your full attack log —
   no diffing folders.

