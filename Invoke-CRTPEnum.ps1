@@ -1133,6 +1133,39 @@ function Invoke-CRTPEnum {
     $s += " GPP cpassword : gpp-decrypt the found cpassword"
     $s += " Trusts        : inter-realm TGT / golden trust ticket for cross-domain, cross-forest with SID history"
     $s += " Deep paths    : run SharpHound -> BloodHound for shortest path to Domain/Enterprise Admin"
+
+    # RECOMMENDED NEXT MOVE  (answers "what attack path should I investigate next?")
+    $prio = @(
+        @{t='DCSync';                     why='DCSync rights -> dump krbtgt -> golden ticket = full domain'},
+        @{t='ESC1';                       why='AD CS ESC1 -> request a cert AS Domain Admin'},
+        @{t='LAPS';                       why='readable LAPS password -> local admin right now'},
+        @{t='GMSA';                       why='readable gMSA -> use its NTLM (overpass-the-hash)'},
+        @{t='GPP';                        why='GPP cpassword -> decrypt a stored credential'},
+        @{t='DumpTarget';                 why='you are admin where a privileged user is logged on -> dump their creds'},
+        @{t='UnconstrainedHost';          why='unconstrained delegation -> coerce a DC and steal its TGT'},
+        @{t='ConstrainedHost';            why='constrained delegation (host) -> impersonate administrator'},
+        @{t='ConstrainedUser';            why='constrained delegation (account) -> impersonate administrator'},
+        @{t='RBCD';                       why='RBCD -> impersonate administrator to that host'},
+        @{t='Kerberoast';                 why='kerberoast -> crack a service account (do any PRIVILEGED ones first)'},
+        @{t='ASREP';                      why='AS-REP roast -> crack the account offline'},
+        @{t='MAQ';                        why='MachineAccountQuota>0 -> add a machine account for RBCD'},
+        @{t='Priv_SeImpersonatePrivilege';why='SeImpersonate -> local SYSTEM on this host'},
+        @{t='Priv_SeDebugPrivilege';      why='SeDebug -> dump LSASS'},
+        @{t='Priv_SeBackupPrivilege';     why='SeBackup -> read SAM / NTDS.dit'}
+    )
+    $nextMove = $null
+    foreach($p in $prio){
+        $hit = $expl | Where-Object { $_.Type -eq $p.t } | Select-Object -First 1
+        if ($hit){
+            $tgt = @($hit.Data.User,$hit.Data.Host,$hit.Data.Template,$hit.Data.Principal,$hit.Data.Instance,$hit.Data.Account) | Where-Object { $_ } | Select-Object -First 1
+            $nextMove = "RECOMMENDED NEXT MOVE: $($p.why)" + $(if($tgt){"  [target: $tgt]"}else{''})
+            break
+        }
+    }
+    if (-not $nextMove){ $nextMove = "RECOMMENDED NEXT MOVE: no direct-exploit finding captured. Run with -HostSweep (sessions/shares/local-admin), or move to a new host/identity and re-run." }
+    $s += "`n" + ("=" * 76)
+    $s += ">>> $nextMove"
+    $s += "    (exact command -> EXPLOIT_COMMANDS.txt   |   full path -> CRTP-Playbook.txt)"
     Save '00_SUMMARY.txt' $s
 
     # ---------------- EXPLOITATION COMMANDS (per finding, pre-filled) ----------------
@@ -1636,6 +1669,7 @@ tr.hi{background:#2d1416}tr:hover{background:#161b22}
 
     Log "`n============================================================" 'Green'
     Log " DONE.  HIGH=$($high.Count)  MED=$($med.Count)  INFO=$($inf.Count)" 'Green'
+    Log " >>> $nextMove" 'Magenta'
     Log " Read first : $run\00_SUMMARY.txt   (or .html)" 'Green'
     Log " Index      : $run\_INDEX.txt   (* = has data)" 'Green'
     Log " Commands   : $run\EXPLOIT_COMMANDS.txt" 'Green'
