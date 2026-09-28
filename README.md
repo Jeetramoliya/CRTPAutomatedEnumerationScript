@@ -14,6 +14,66 @@ New here? Read **`Start-Here.txt`** for the exact launch sequence.
 > **It's a companion, not a magic button.** It finds and ranks targets and writes the
 > commands; *you* run the exploitation steps. Read-only and safe to re-run every hop.
 
+---
+
+## How it works (in plain words)
+
+If you've never touched AD attacks, here's the whole idea in 6 steps:
+
+1. **You load your tools** in a stealthy shell (InviShell), then run the script and point it at a domain.
+2. **It checks it can reach a Domain Controller** (if not — e.g. you gave it a website — it says so and stops the AD part).
+3. **It asks "who am I?"** — your account, privileges, and admin rights on this machine.
+4. **It quietly queries the domain** over LDAP — users, computers, groups, delegation, ACLs, GPOs, trusts, certificate services, and where the passwords/secrets are.
+5. **It ranks what it found** (HIGH → do first, MED, INFO) and writes it to files, including the exact command to attack each finding.
+6. **It tells you the single best next move.** You run that command, get new access, and **re-run the script as the new user** — repeat until you own the domain.
+
+### The flow (diagram)
+
+```mermaid
+flowchart TD
+    A([Open InviShell shell]) --> B[Load AD module / PowerView<br/>optional: PowerUp, SessionHunter]
+    B --> C[".\Invoke-CRTPEnum.ps1 -Domain corp.local"]
+    C --> D{Can it reach a Domain Controller?}
+    D -- No --> D1["Warn: not an AD domain - local checks only"]
+    D -- Yes --> E[00 · Who am I?<br/>token · privileges · groups]
+    E --> F[Quietly enumerate the domain over LDAP]
+    F --> F1[Users<br/>kerberoast · AS-REP · secrets<br/>delegation · SID history]
+    F --> F2[Computers<br/>delegation · RBCD · MAQ]
+    F --> F3[Groups · GPO · AD CS ESC1<br/>DCSync · LAPS · gMSA]
+    F --> F4[ACLs · Trusts · SPNs · MSSQL]
+    F --> F5{"-HostSweep ? (louder)"}
+    F5 -- yes --> F6[Local-admin · shares · live sessions]
+    F1 --> G[Rank findings: HIGH / MED / INFO]
+    F2 --> G
+    F3 --> G
+    F4 --> G
+    F6 --> G
+    G --> H[Write output files]
+    H --> H1[00_SUMMARY.txt]
+    H --> H2[EXPLOIT_COMMANDS.txt]
+    H --> H3[CRTP-Playbook.txt]
+    H --> H4[findings.json · _ALL.txt · NEW_this_run.txt]
+    H --> I["RECOMMENDED NEXT MOVE (the single best action)"]
+    I --> J[You run the exploit command]
+    J --> K{Got new creds or access?}
+    K -- yes --> L[Become the new identity<br/>runas /netonly or pass-the-ticket]
+    L --> C
+    K -- no --> M([Done for this host])
+```
+
+> The diagram renders automatically on the GitHub page. The dashed **"-HostSweep"** branch
+> is the only part that touches other computers — everything else is quiet LDAP.
+
+### The core loop
+
+```
+enumerate  ->  read RECOMMENDED NEXT MOVE  ->  run its command (EXPLOIT_COMMANDS.txt)
+    ^                                                        |
+    |________  re-run as the new user/creds  <______________|
+```
+
+---
+
 ### Noise posture (important)
 
 - **Default = QUIET.** Only LDAP + local-host checks run — normal-looking AD traffic,
