@@ -1,13 +1,18 @@
 # CRTP Enumeration Kit
 
 `Invoke-CRTPEnum.ps1` — one-shot, read-only AD recon for the CRTP lab.
-It writes a ranked `00_SUMMARY.txt` (HIGH / MED / INFO), per-section dumps, and an
-`EXPLOIT_COMMANDS.txt` with the exact command for each finding — so you spend exam
-time exploiting, not typing recon one-liners.
+It writes a ranked `00_SUMMARY.txt` (HIGH / MED / INFO), per-section dumps, an
+`EXPLOIT_COMMANDS.txt` with the exact command for each finding, a phase playbook, and
+ends every run with a single **RECOMMENDED NEXT MOVE** — so you spend exam time
+exploiting, not typing recon one-liners.
 
-**Zero dependencies.** Just the one `.ps1` file runs anywhere via raw LDAP. RSAT /
-the standalone AD module DLL / PowerView / PowerUp only *add* depth if present.
+**Zero dependencies.** Just the one `.ps1` file runs anywhere via raw LDAP — and the
+raw-LDAP path is at **full parity** with the AD-module path (same findings either way).
+RSAT / the standalone AD module DLL / PowerView / PowerUp only *add* depth or speed.
 New here? Read **`Start-Here.txt`** for the exact launch sequence.
+
+> **It's a companion, not a magic button.** It finds and ranks targets and writes the
+> commands; *you* run the exploitation steps. Read-only and safe to re-run every hop.
 
 ### Noise posture (important)
 
@@ -86,6 +91,8 @@ Invoke-CRTPEnum -Quick                           # skip slow ACL/local-admin swe
 Invoke-CRTPEnum -IncludeForest                   # also touch trusted domains
 Invoke-CRTPEnum -Target dcorp-appsrv -Quick      # fast re-run scoped to one new foothold
 Invoke-CRTPEnum -WinPEASPath C:\Tools\winPEASx64.exe   # opt-in deep local triage (LOUD)
+Invoke-CRTPEnum -Json                            # also write findings.json (for the cheatsheet / tooling)
+Invoke-CRTPEnum -Zip                             # also zip the whole run folder
 ```
 
 **`-Target`** filters the host-centric sections (computers, shares, sessions) to the
@@ -113,9 +120,18 @@ It overlaps section 13 (PowerUp/PrivEscCheck) but goes wider on creds-on-disk.
 It's **loud and AV-signatured**, so it only runs when you explicitly pass the path —
 never as part of a normal quiet sweep.
 
-Read `00_SUMMARY.txt` top-down. Everything under **HIGH** is a direct lead.
+**`-Json`** also writes `findings.json` — a machine-readable file with the discovered
+values (`domainSid`/`parent`/`forest`/`dc`), severity counts, the ranked findings, and
+the exploitable entries. Built to import into the CRTP cheatsheet's "My Values" panel
+or any other tooling.
 
-**Four views of the results:**
+**`-Zip`** also archives the whole run folder to `<run>.zip` for easy transfer/reporting.
+
+Read `00_SUMMARY.txt` top-down. Everything under **HIGH** is a direct lead, and the
+bottom line — **`>>> RECOMMENDED NEXT MOVE`** — names the single highest-value action
+(and its target) so you always know what to investigate next.
+
+**Views of the results:**
 - `00_SUMMARY.txt` — ranked, per-run, with a finding→action cheat at the bottom.
 - `00_SUMMARY.html` — same, color-coded (open in a browser; nice for the exam report).
 - **`EXPLOIT_COMMANDS.txt`** — for every finding, the **exact command pre-filled with
@@ -137,6 +153,9 @@ Read `00_SUMMARY.txt` top-down. Everything under **HIGH** is a direct lead.
 - **`_ALL.txt`** — **everything in ONE file:** every section dump merged in logical
   order (summary → exploit commands → playbook → all raw sections). Open this if you
   want a single scrollable/greppable file instead of 20+ separate ones.
+- `findings.json` (with `-Json`) — machine-readable values + findings for the cheatsheet
+  importer / other tooling.
+- `<run>.zip` (with `-Zip`) — the whole run folder archived.
 
 ---
 
@@ -147,14 +166,14 @@ Read `00_SUMMARY.txt` top-down. Everything under **HIGH** is a direct lead.
 | Current context | `00_context` | Your token: SeImpersonate/SeBackup/SeDebug (→ potato/dump), privileged group membership |
 | EDR/AV | `00b_edr` | Defensive products on this host (needs Invoke-EDRChecker) |
 | Domain/Trusts | `01_` | DCs, trust direction, SID-filtering state |
-| Users | `02_`, `02a`, `02b` | Kerberoastable SPNs, AS-REP, no-preauth, PASSWD_NOTREQD, desc/info secrets, delegation, adminCount |
-| Computers | `03_` | Unconstrained/constrained delegation, RBCD, MachineAccountQuota, legacy OS |
-| Priv groups | `04_` | DA/EA/Admins/DnsAdmins/… recursive membership |
-| GPO | `05_` | GPO list + auto SYSVOL `cpassword` scan |
-| AD CS | `06_` | Enterprise CA + published templates (then Certify) |
+| Users | `02_`, `02a`, `02b` | Kerberoastable (RC4/AES + `adminCount` priority), AS-REP, no-preauth, PASSWD_NOTREQD, desc/info secrets, delegation, **protocol transition**, **SID history**, adminCount |
+| Computers | `03_` | Unconstrained/constrained delegation, RBCD, **protocol transition**, MachineAccountQuota, legacy OS |
+| Priv groups | `04_` | DA/EA/Admins/DnsAdmins/… recursive membership + **AdminSDHolder write rights** (persistent DA) |
+| GPO | `05_` | GPO list + auto SYSVOL `cpassword` scan + **GPO edit rights** |
+| AD CS | `06_` | Enterprise CA + **ESC1 vulnerable-template auto-detect (pure LDAP, no Certify)** |
 | Password policy | `06b_` | minLen / lockout → tells you if spraying is safe |
 | DCSync rights | `06c_` | Non-default principals with replication rights (→ dcsync) |
-| LAPS | `06d_` | Local-admin passwords you can actually read |
+| LAPS | `06d_` | Local-admin passwords you can read **+ who else is delegated read** |
 | ACLs | `07_` | GenericAll/WriteDacl/WriteOwner (needs PowerView) |
 | Local admin | `08_` | Hosts where you are local admin (needs PowerView) |
 | SPNs/MSSQL | `09_`,`10_` | Service inventory + MSSQL link-crawl targets |
@@ -185,7 +204,10 @@ Unconstrained capture TGTs (Rubeus monitor/triage) + coerce a DC:
               MS-RPRN.exe | WSPCoerce.exe | DFSCoerce-andrea.exe  <listener> <victim-DC>
 Constrained   Rubeus.exe s4u /user: /rc4: /impersonateuser:administrator /msdsspn: /ptt
 RBCD / MAQ>0  Get-RBCD-Threaded.exe / add machine acct -> set msDS-AllowedToActOnBehalfOfOtherIdentity -> Rubeus s4u
-AD CS         Certify.exe find /vulnerable -> ESC1/ESC8 -> Rubeus asktgt /certificate
+AD CS ESC1    Certify.exe request /template:<vuln> /altname:administrator -> Rubeus asktgt /certificate
+gMSA readable read msDS-ManagedPassword (GMSAPasswordReader) -> use NTLM with Rubeus /rc4
+SID history   investigate the injected/foreign SID (existing cross-domain path or persistence)
+AdminSDHolder if you can write it -> add yourself; SDProp re-applies to protected groups = persistent DA
 Dangerous ACL reset pwd / add-to-group / targeted Kerberoast via the abused right
 Local privesc PowerUp Invoke-PrivescAudit -> Invoke-ServiceAbuse; or Invoke-PrivescCheck
 Shares        loot creds/configs from readable shares; RACE.ps1 to plant ACL backdoors post-DA
@@ -216,4 +238,19 @@ Deep paths    SharpHound -> BloodHound for shortest path to DA/EA
 > Scope note: these are for the authorized CRTP lab / your own AD only.
 
 ---
-*`Invoke-CRTPEnum.ps1` is read-only: it does not modify AD, touch AMSI, or run any binary. It only locates targets.*
+
+## 5. Status / limits (honest)
+
+- **Read-only.** It does not modify AD, touch AMSI, or run any offensive binary on its
+  own. It locates + ranks targets, writes the commands, and names the next move — *you*
+  run the exploitation steps.
+- **Parity:** the raw-LDAP fallback now emits the same findings as the AD-module path,
+  so a fresh session with nothing loaded still gets the full picture.
+- **Unproven bit:** live AD-data output hasn't been validated against a real domain
+  (queries are standard/correct; logic paths are tested). On first lab access, run
+  `-Only users` and sanity-check the output before trusting the rest.
+- **Not battle-tested at enterprise scale** (RODC / disjoint namespace / huge or
+  non-English forests). Fine for CRTP's standard lab.
+
+---
+*`Invoke-CRTPEnum.ps1` is read-only: it does not modify AD, touch AMSI, or run any offensive binary. It locates targets, writes the commands, and recommends the next move.*
