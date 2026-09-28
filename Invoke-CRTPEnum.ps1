@@ -380,11 +380,17 @@ function Invoke-CRTPEnum {
             foreach($u in (Get-DomainUser -PreauthNotRequired -Domain $Domain)){ Flag 'HIGH' "AS-REP roastable: $($u.samaccountname)" }
         }
         else {
-            foreach($r in (LDAP '(&(objectCategory=user)(servicePrincipalName=*))' @('samaccountname','serviceprincipalname'))){
-                Flag 'HIGH' "Kerberoastable user $(PV $r 'samaccountname')  SPN=$(PV $r 'serviceprincipalname')"; AddExpl 'Kerberoast' @{ User=(PV $r 'samaccountname') }
+            foreach($r in (LDAP '(&(objectCategory=user)(servicePrincipalName=*))' @('samaccountname','serviceprincipalname','admincount','msds-supportedencryptiontypes'))){
+                $et  = IntP $r 'msds-supportedencryptiontypes'
+                $enc = if ((-not $et) -or (($et -band 0x4) -and -not ($et -band 0x18))) { 'RC4-easy' } elseif ($et -band 0x18) { 'AES' } else { 'RC4-easy' }
+                $prio = if ((IntP $r 'admincount') -eq 1) { ' [PRIVILEGED adminCount=1 - crack = instant DA]' } else { '' }
+                Flag 'HIGH' "Kerberoastable $(PV $r 'samaccountname')$prio  enc=$enc  SPN=$(PV $r 'serviceprincipalname')"; AddExpl 'Kerberoast' @{ User=(PV $r 'samaccountname') }
             }
             foreach($r in (LDAP '(&(objectCategory=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304))' @('samaccountname'))){
                 Flag 'HIGH' "AS-REP roastable: $(PV $r 'samaccountname')"; AddExpl 'ASREP' @{ User=(PV $r 'samaccountname') }
+            }
+            foreach($r in (LDAP '(&(objectCategory=user)(userAccountControl:1.2.840.113556.1.4.803:=16777216))' @('samaccountname'))){
+                Flag 'HIGH' "Protocol transition (TrustedToAuthForDelegation) on user $(PV $r 'samaccountname') - S4U2Self for ANY user"
             }
             foreach($r in (LDAP '(&(objectCategory=user)(userAccountControl:1.2.840.113556.1.4.803:=524288))' @('samaccountname'))){
                 Flag 'HIGH' "User trusted for UNCONSTRAINED delegation: $(PV $r 'samaccountname')"; AddExpl 'UnconstrainedUser' @{ User=(PV $r 'samaccountname') }
@@ -421,10 +427,15 @@ function Invoke-CRTPEnum {
             foreach($c in ($comps | Where-Object { $_.'msDS-AllowedToActOnBehalfOfOtherIdentity' })){ Flag 'HIGH' "RBCD configured on: $($c.Name) (msDS-AllowedToActOnBehalfOfOtherIdentity set)"; AddExpl 'RBCD' @{ Host=$c.Name } }
             foreach($c in ($comps | Where-Object { $_.OperatingSystem -match '2008|2003|Windows 7|Windows XP|Vista' })){ Flag 'MED' "Legacy OS: $($c.Name) [$($c.OperatingSystem)]" }
         } else {
-            foreach($r in (LDAP '(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=524288))' @('dnshostname'))){ Flag 'HIGH' "UNCONSTRAINED delegation host: $(PV $r 'dnshostname')" }
-            foreach($r in (LDAP '(&(objectCategory=computer)(msDS-AllowedToDelegateTo=*))' @('dnshostname','msds-allowedtodelegateto'))){ Flag 'HIGH' "Constrained delegation host [$(PV $r 'dnshostname')] -> $(PV $r 'msds-allowedtodelegateto')" }
-            foreach($r in (LDAP '(&(objectCategory=computer)(msDS-AllowedToActOnBehalfOfOtherIdentity=*))' @('dnshostname'))){ Flag 'HIGH' "RBCD configured on: $(PV $r 'dnshostname')" }
-            $out += (LDAP '(objectCategory=computer)' @('dnshostname','operatingsystem') | ForEach-Object { "$(PV $_ 'dnshostname')  [$(PV $_ 'operatingsystem')]" }) -join "`n"
+            foreach($r in (LDAP '(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=524288))' @('dnshostname'))){ Flag 'HIGH' "UNCONSTRAINED delegation host: $(PV $r 'dnshostname')"; AddExpl 'UnconstrainedHost' @{ Host=(PV $r 'dnshostname') } }
+            foreach($r in (LDAP '(&(objectCategory=computer)(msDS-AllowedToDelegateTo=*))' @('dnshostname','msds-allowedtodelegateto'))){ Flag 'HIGH' "Constrained delegation host [$(PV $r 'dnshostname')] -> $(PV $r 'msds-allowedtodelegateto')"; AddExpl 'ConstrainedHost' @{ Host=(PV $r 'dnshostname'); SPN=(PV $r 'msds-allowedtodelegateto') } }
+            foreach($r in (LDAP '(&(objectCategory=computer)(msDS-AllowedToActOnBehalfOfOtherIdentity=*))' @('dnshostname'))){ Flag 'HIGH' "RBCD configured on: $(PV $r 'dnshostname')"; AddExpl 'RBCD' @{ Host=(PV $r 'dnshostname') } }
+            foreach($r in (LDAP '(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=16777216))' @('dnshostname'))){ Flag 'HIGH' "Protocol transition (TrustedToAuthForDelegation) on host $(PV $r 'dnshostname') - S4U2Self for ANY user" }
+            foreach($r in (LDAP '(objectCategory=computer)' @('dnshostname','operatingsystem'))){
+                $os = PV $r 'operatingsystem'
+                if ($os -match '2008|2003|Windows 7|Windows XP|Vista'){ Flag 'MED' "Legacy OS: $(PV $r 'dnshostname') [$os]" }
+                $out += "$(PV $r 'dnshostname')  [$os]"
+            }
         }
         # MachineAccountQuota
         try {
