@@ -73,15 +73,18 @@ Keep the recon tool clean; let InviShell own the environment.
  2) (Optional) AMSI + logging bypass for loading OTHER modules:
         run Amsi-Byp.txt  and  sbloggingbypass.txt
 
- 3) (Optional) load real AD cmdlets WITHOUT RSAT, and PowerView etc:
-        Import-Module D:\CRTP\Tools\ADModule-master\Microsoft.ActiveDirectory.Management.dll
-        Import-Module D:\CRTP\Tools\PowerView.ps1
-        Import-Module D:\CRTP\Tools\PowerUp.ps1
-        . D:\CRTP\Tools\Invoke-SessionHunter.ps1
+ 3) Load all prerequisites in one shot (edit -ToolsRoot if yours differ):
+        . .\Setup\Load-CRTPTools.ps1
+        . .\Setup\Load-CRTPTools.ps1 -ToolsRoot D:\CRTP\Tools   # (explicit)
+    It imports the AD module / PowerView / PowerUp / PowerHuntShares / SessionHunter /
+    EDRChecker / PowerUpSQL and prints a capability check. (See Setup\REQUIREMENTS.md.)
 
  4) Run the enum (auto-uses whatever you loaded, else pure LDAP):
         . .\Invoke-CRTPEnum.ps1
         Invoke-CRTPEnum -Domain dollarcorp.moneycorp.local -OutDir C:\Users\Public\loot
+
+ NOTE: two evasion layers - InviShell covers THIS .ps1; use Loader for the .EXE tools
+ (Rubeus/SafetyKatz/SharpHound...) you run afterward from EXPLOIT_COMMANDS.txt.
 
 ------------------------------------------------
 WORKFLOW LOOP (repeat after every new foothold)
