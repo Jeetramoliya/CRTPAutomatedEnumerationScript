@@ -14,6 +14,12 @@ New here? Read **`Start-Here.txt`** for the exact launch sequence.
 > **It's a companion, not a magic button.** It finds and ranks targets and writes the
 > commands; *you* run the exploitation steps. Read-only and safe to re-run every hop.
 
+> **CRTP exam notes:** goal = OS command execution on all 5 targets (+ the DC flag at
+> `C:\Users\finadmin\Desktop\finalflag.txt`); prefer **SafetyKatz** for OverPass-the-Hash
+> (Rubeus was flaky); no dictionary brute-force is required; run BloodHound's collector in
+> the lab and its GUI on your host. **The report must be in your own words** — this tool's
+> output is a doing aid, not report text (AI-generated report content is rejected).
+
 ---
 
 ## How it works (in plain words)

