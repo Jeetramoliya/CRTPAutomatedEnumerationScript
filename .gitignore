@@ -7,3 +7,8 @@ loot/
 *.pfx
 *_hashes.txt
 bloodhound_*.zip
+
+# Exam write-ups contain live creds/flag - keep out of git
+CRTP-engagement-handoff.md
+CRTP-full-walkthrough.md
+CRTP-solution-summary.md
