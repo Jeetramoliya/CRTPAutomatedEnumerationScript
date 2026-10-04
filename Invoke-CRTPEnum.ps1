@@ -19,6 +19,16 @@
           not run any offensive binary. It finds targets, then writes the
           exact exploitation command for each finding to EXPLOIT_COMMANDS.txt.
 
+    LOADING UNDER AV (IMPORTANT)
+        This file embeds mimikatz/Rubeus/Certify command STRINGS in its
+        EXPLOIT_COMMANDS output, so Windows Defender (real-time protection)
+        may quarantine/delete it the moment you dot-source it. To load it:
+          * run it inside InviShell (RunWithRegistryNonAdmin.bat), or
+          * apply an AMSI/script-block-logging bypass first, or
+          * add a Defender exclusion for your tools folder (your own lab box).
+        Syntax-checking is always safe (no execution):
+          [System.Management.Automation.Language.Parser]::ParseFile('.\Invoke-CRTPEnum.ps1',[ref]$null,[ref]$null)
+
     USAGE
         . .\Invoke-CRTPEnum.ps1
         Invoke-CRTPEnum                                   # current domain
@@ -1029,7 +1039,8 @@ function Invoke-CRTPEnum {
                         foreach($it in $items){
                             $out += "  $($it.FullName)  [$($it.Length)b]"
                             if ($it.Name -match $keyExt){
-                                Flag 'HIGH' "Private key / credential file on share: $($it.FullName) -> may allow PKINIT / direct authentication"
+                                $xf = if ($xforest){ " (cross-forest trust present -> PKINIT with this cert BYPASSES SID filtering into the other forest)" } else { "" }
+                                Flag 'HIGH' "Private key / credential file on share: $($it.FullName) -> may allow PKINIT / direct authentication$xf"
                                 AddExpl 'ShareSecretFile' @{ File=$it.FullName }
                             } elseif ($it.Name -match $nameHit){
                                 Flag 'MED' "Interesting file on share: $($it.FullName)"
