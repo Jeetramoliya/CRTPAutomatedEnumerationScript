@@ -387,6 +387,48 @@ Deep paths    SharpHound -> BloodHound for shortest path to DA/EA
 
 ---
 
+## 3b. Getting the tools (NOT bundled in this repo)
+
+The exploitation tools are **deliberately not committed here** — they're offensive/licensed
+binaries, this repo is public, and GitHub's acceptable-use policy and your own AV both flag
+compiled mimikatz/Rubeus/etc. Keep them in your own `D:\CRTP\Tools\` (the course `Tools.zip`),
+and load them with `Setup/Load-CRTPTools.ps1`. See **`Setup/REQUIREMENTS.md`** for the exact
+load order and which tool unlocks which section.
+
+> Only `Invoke-CRTPEnum.ps1` needs nothing — it runs on raw LDAP. Everything below just adds
+> depth (PS modules) or is for the *exploitation* step after the enum names your next move.
+
+**Download each from its official source** (verify hashes; use versions your lab supports):
+
+| Tool | Official source |
+|------|-----------------|
+| AD Module (no-RSAT) | `github.com/samratashok/ADModule` |
+| Invisi-Shell | `github.com/OmerYa/Invisi-Shell` |
+| PowerView / PowerUp / Invoke-Mimikatz | `github.com/PowerShellMafia/PowerSploit` (dev branch) |
+| Powermad | `github.com/Kevin-Robertson/Powermad` |
+| PowerUpSQL | `github.com/NetSPI/PowerUpSQL` |
+| PrivescCheck | `github.com/itm4n/PrivescCheck` |
+| Invoke-SessionHunter | `github.com/Leo4j/Invoke-SessionHunter` |
+| Rubeus | `github.com/GhostPack/Rubeus` |
+| Certify | `github.com/GhostPack/Certify` |
+| SafetyKatz | `github.com/GhostPack/SafetyKatz` |
+| mimikatz | `github.com/gentilkiwi/mimikatz` |
+| SharpHound / BloodHound | `github.com/BloodHoundAD/SharpHound` · `github.com/SpecterOps/BloodHound` |
+| SharpGPOAbuse | `github.com/WithSecureLabs/SharpGPOAbuse` |
+| GMSAPasswordReader | `github.com/rvazarkar/GMSAPasswordReader` |
+| ADCollector | `github.com/dev-2null/ADCollector` |
+| winPEAS | `github.com/peass-ng/PEASS-ng` |
+| HFS (file transfer) | `rejetto.com` (HTTP File Server) |
+| OpenSSL (Windows) | `openssl.org` / a trusted Windows build |
+| PsExec | Microsoft Sysinternals — `learn.microsoft.com/sysinternals/downloads/psexec` (**EULA forbids redistribution**) |
+| netcat (`nc64.exe`) | a trusted Windows netcat/ncat build |
+| Coercion (`MS-RPRN`/`DFSCoerce`/`WSPCoerce`), `Get-RBCD-Threaded`, `FindLSASSPID`/`minidumpdotnet`, `InviShell`/`Loader`/`EDRChecker.exe` | course `Tools.zip` (Altered Security) / their respective author repos |
+
+> Links are pointers, not endorsements of a specific fork — pick the upstream your course
+> uses and check it before running. All strictly for the authorized CRTP lab / your own AD.
+
+---
+
 ## 4. Your existing tools (for reference)
 
 - **Bypass:** `Amsi-Byp.txt`, `DotNET AMSI.txt`, `sbloggingbypass.txt` (ETW/ScriptBlock)

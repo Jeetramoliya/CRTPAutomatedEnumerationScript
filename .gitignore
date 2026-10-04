@@ -12,3 +12,9 @@ bloodhound_*.zip
 CRTP-engagement-handoff.md
 CRTP-full-walkthrough.md
 CRTP-solution-summary.md
+
+# Offensive/licensed tool binaries are NOT bundled (see Setup/REQUIREMENTS.md) - never commit them
+CRTP-Exam-Tools.zip
+*.zip
+*.exe
+*.dll
